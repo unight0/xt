@@ -3,7 +3,7 @@ CXX = gcc
 LD = gcc
 CFLAGS = -g -Wall -Wextra
 LDFLAGS =
-TARGET = f
+TARGET = xt
 
 SRCS = $(wildcard *.c)
 OBJS = $(SRCS:.c=.o)

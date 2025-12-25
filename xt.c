@@ -23,13 +23,13 @@
 #define ID_FLT             4
 #define ID_CHAR            5
 
-#define THROW_EOF              -39
 #define THROW_STACK_OVERFLOW   -3
 #define THROW_STACK_UNDERFLOW  -4
 //#define THROW_RSTACK_OVERFLOW  -5
 //#define THROW_RSTACK_UNDERFLOW -6
 #define THROW_UNDEFINED_WORD   -13
 #define THROW_COMPONLY_WORD    -14
+#define THROW_EOF              -39
 #define THROW_INTRONLY_WORD    -9998
 #define THROW_OUT_OF_MEM       -9999
 
@@ -243,7 +243,7 @@ pop(struct environ en,
     return c;
 }
 int
-identify(const char *tok) {
+identify(char *tok) {
     assert(strlen(tok) && "Empty token");
 
     // 'c'
@@ -269,10 +269,13 @@ identify(const char *tok) {
         return ID_WORD;
     }
 
+    if ((*tok == '-') && strlen(tok) > 1)
+        tok++;
+
     if (!isdigit(*tok)) return ID_WORD;
 
     int dots = 0;
-    
+
     for (; isdigit(*tok) || *tok == '.'; tok++) {
         if (*tok == '.') dots++;
     }
@@ -1039,13 +1042,14 @@ throw(struct environ en,
     en.st->cur =  *en.catch_st;
     en.rst->cur = *en.catch_rst;
 
-    push(en, tok, en.st, val);
-
     // Toplevel catcher
     if (*en.ip == NULL) {
         printf("(%d:%d '%s') CAUGHT %ld from %p\n",
                 tok.line+1, tok.col+1, tok.val, val, before);
+        return;
     }
+
+    push(en, tok, en.st, val);
 }
 
 void
@@ -1063,7 +1067,7 @@ builtin_stackdump(struct environ en,
     printf("(%s %d:%d) initiating stack dump\n", tok.val, tok.line, tok.col);
     printf("      DATA STACK\n");
     for (cell *p = (cell*) en.st->cur; p < (cell*) en.st->begin; p++) {
-        if (*p < 128)
+        if (*p < 128 && *p != '\n')
             printf("  %16ld ('%c') %11p\n", *p, (char)*p, (void*)*p);
         else
             printf("  %16ld %16p\n", *p, (void*)*p);
@@ -1097,7 +1101,6 @@ builtin_worddump(struct environ en,
     }
 
     printf("Worddump for %s\n", e->name);
-    printf("At %p\n", e->body);
     for (struct entry **w = (struct entry**) e->body;
          (*w)->code != builtin_ret; w++) {
 
@@ -1128,8 +1131,8 @@ builtin_worddump(struct environ en,
     }
 
 
-    raise(SIGINT);
-    exit(0);
+    //raise(SIGINT);
+    //exit(0);
 }
 
 void
@@ -1202,8 +1205,9 @@ builtin_refill(struct environ en,
 int
 main(int argc, char **argv) {
     if (argc < 2) {
-        printf("Provide source code files\n");
-        exit(0);
+        printf("Please note that XT is basically non-functional without\n");
+        printf("a file that lays out definitions of some basic words\n");
+        printf("You can use basis.f, which should come together with XT: %s basis.f\n", argv[0]);
     }
 
     char *mem_buf = malloc(MEMORY_SIZE);
@@ -1225,11 +1229,10 @@ main(int argc, char **argv) {
     //size_t newword_sz = 0;
     cell *ip = NULL;
     cell *catch = NULL;
-    char *catch_st = NULL;
-    char *catch_rst = NULL;
+    char *catch_st = stk.cur;
+    char *catch_rst = rstk.cur;
     struct entry *xt = NULL;
     char *pad = malloc(PAD_SIZE);
-
 
     dict = dict_append_builtin(&mem, dict, "lit", 0, builtin_lit);
     dict = dict_append_builtin(&mem, dict, "strlit", 0, builtin_strlit);
@@ -1300,6 +1303,22 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "stackdump", 0, builtin_stackdump);
     dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);
 
+    struct environ en = {
+         NULL,
+         &mem,
+         &stk,
+         &rstk,
+         &dict,
+         &mode,
+         pad,
+         &newword_name,
+         &newword,
+         &ip,
+         &xt,
+         &catch,
+         &catch_st,
+         &catch_rst
+    };
     for (int i = 1; i < argc; i++) {
         char *code = readfile(argv[i]);
         if (code == NULL) continue;
@@ -1307,26 +1326,27 @@ main(int argc, char **argv) {
         struct tstate st = {0};
         st.real_cur = code;
 
+        // NOTE: this naming is confusing.
+        // struct tstate is the state of the input,
+        // not necessairly terminal
+        en.term = &st;
+
         while (!refill(&st)) {
-            struct environ en = {
-                 &st,
-                 &mem,
-                 &stk,
-                 &rstk,
-                 &dict,
-                 &mode,
-                 pad,
-                 &newword_name,
-                 &newword,
-                 &ip,
-                 &xt,
-                 &catch,
-                 &catch_st,
-                 &catch_rst
-            };
             eval(en);
         }
         free(code);
     }
 
+    for (;!feof(stdin) && !ferror(stdin);) {
+        printf("> ");
+        struct tstate st = {0};
+        fgets(st.source, SOURCE_SIZE, stdin);
+        st.cur = st.source;
+        st.real_cur = st.source + strlen(st.source);
+        en.term = &st;
+
+        // We assume that there's only one line, since
+        // fgets should return only one line
+        eval(en);
+    }
 }

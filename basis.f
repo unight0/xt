@@ -46,13 +46,14 @@
   postpone r> postpone drop postpone r> postpone drop
 ; immediate compile-only
 
+: mem-total mem-end mem-begin - ;
 : mem-used here mem-begin - ;
 : mem-left mem-end here - ;
 
 ( s -- )
 : type while dup b@ 0 != begin dup b@ b>t 1 + done drop ;
 ( -- )
-: words dict while dup 0 != begin dup ->name type 32 b>t ->next done 10 b>t ;
+: words dict while dup 0 != begin dup ->name type 32 b>t ->next done drop 10 b>t ;
 
 ( str -- len )
 : strlen
@@ -82,9 +83,4 @@
 ; immediate compile-only
 : .( ')' parse type ; immediate
 
-\ words
-
-: t<< 10 parse type cr ;
-\ t<< One two three four?
-: test 1000 0 do 1 loop ;
-\ test
+: mem-report mem-used . '/' b>t mem-total . s"  bytes used" type cr ;
