@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <signal.h>
 
 #define DICT_FLAG_IMMED    1
 #define DICT_FLAG_COMPONLY 1 << 1
@@ -11,6 +12,8 @@
 #define MEMORY_SIZE        32*1024
 #define STACK_SIZE         256
 #define RSTACK_SIZE        512
+#define PAD_SIZE           1024
+#define SOURCE_SIZE        1024
 #define MODE_INTERPRET     0
 #define MODE_COMPILE       1
 #define ID_WORD            0
@@ -18,12 +21,20 @@
 #define ID_HEX             2
 #define ID_BIN             3
 #define ID_FLT             4
+#define ID_CHAR            5
 
+#define THROW_EOF              -39
+//#define THROW_STACK_OVERFLOW   -3
+#define THROW_STACK_UNDERFLOW  -4
+//#define THROW_RSTACK_OVERFLOW  -5
+//#define THROW_RSTACK_UNDERFLOW -6
 
 typedef uint64_t cell;
 typedef uint8_t  byte;
 
 struct tstate {
+    char  source[SOURCE_SIZE];
+    char *real_cur;
     int   line;
     int   col;
     char *cur;
@@ -67,6 +78,7 @@ struct environ {
     struct stack  *rst;
     struct entry  **dict;
     char          *mode;
+    char          *pad;
     /* Used for compilation mode */
     char          **newword_name;
     char          **newword;
@@ -74,7 +86,12 @@ struct environ {
     /* Inner interpreter */
     cell         **ip;
     struct entry **xt; 
+    cell         **catch;
+    char         **catch_st;
+    char         **catch_rst;
 };
+
+void throw(struct environ, struct token, cell);
 
 void
 advance(struct tstate *st) {
@@ -131,7 +148,7 @@ new_stack(struct memory *mem, size_t size) {
 
 struct entry *
 dict_search(struct entry *dict, const char *word) {
-    for (size_t i = 0; i < 1000000; /*i++*/) {
+    for (size_t i = 0; i < 1000000; i++) {
         if (dict == NULL) return NULL;
         if (!strcmp(dict->name, word))
             return dict;
@@ -207,6 +224,13 @@ int
 identify(const char *tok) {
     assert(strlen(tok) && "Empty token");
 
+    // 'c'
+    if (strlen(tok) == 3) {
+        if (tok[0] == '\'' && tok[2] == '\'') {
+            return ID_CHAR;
+        }
+    }
+
     // 0xDEADBEEF
     if (*tok == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
         tok += 2;
@@ -252,7 +276,7 @@ NEXT(struct environ en,
     while (*en.ip != NULL) {
         *en.xt = (struct entry*)**en.ip;
 
-        printf("NEXT(): %s\n", (*en.xt)->name);
+        //printf("NEXT(): %s\n", (*en.xt)->name);
 
         if ((*en.xt)->flags & DICT_FLAG_INTRONLY) {
             error(tok, "INTERNAL CRITICAL ERROR: Encountered an interpret-only word during NEXT()");
@@ -276,6 +300,11 @@ execute_word(struct environ en,
     *en.xt = e;
     e->code(en, tok);
     NEXT(en, tok);
+
+    // Catches set within the return stack cannot be returned to
+    *en.catch = NULL;
+    *en.catch_st = en.st->cur;
+    *en.catch_rst = en.rst->cur;
 }
 
 void
@@ -308,6 +337,9 @@ execute_token(struct environ en,
         case ID_BIN:
             push(tok, en.st, strtoll(tok.val, NULL, 2));
             break;
+        case ID_CHAR:
+            push(tok, en.st, (cell) tok.val[1]);
+            break;
         case ID_FLT:
             printf("Floats are not implemented yet\n");
             exit(1);
@@ -324,13 +356,13 @@ void
 compile_word(struct environ en,
              struct token   tok) {
     struct entry *e = dict_search(*en.dict, tok.val);
-    printf("CW: %s\n", e->name);
     if (e == NULL) {
         error(tok, "Unknown word");
         return;
     }
+    //printf("CW: %s\n", e->name);
     if (e->flags & DICT_FLAG_IMMED) {
-        printf("IMMED %s\n", e->name);
+        //printf("IMMED %s\n", e->name);
         execute_word(en, tok, e);
         return;
     }
@@ -355,7 +387,7 @@ compile_push(struct token   tok,
         exit(1);
     }
     
-    printf("CPSH: %ld\n", val);
+    //printf("CPSH: %ld\n", val);
 
     *(cell*) en.mem->cur = (cell) w_lit;
     en.mem->cur += sizeof(cell);
@@ -390,6 +422,9 @@ compile_token(struct environ en,
             break;
         case ID_BIN:
             compile_push(tok, en, strtoll(tok.val, NULL, 2));
+            break;
+        case ID_CHAR:
+            compile_push(tok, en, (cell) tok.val[1]);
             break;
         case ID_FLT:
             printf("Floats are not implemented yet\n");
@@ -432,13 +467,29 @@ builtin_lit(struct environ en,
     ++*en.ip;
 }
 
+// Pushes the string onto stack, skips it
+void
+builtin_strlit(struct environ en,
+               struct token   tok) {
+
+    push(tok, en.st, (cell) *en.ip);
+
+    char *end = (char*)*en.ip;
+    for (; *end; end++);
+
+    //printf("STRLIT: %s\n", (char*)*en.ip);
+
+    *en.ip = (cell*)(end + 1);
+}
+
 void
 builtin_ret(struct environ en,
             struct token   tok) {
 
-    printf("RET\n");
 
     cell new_ip = pop(tok, en.rst);
+
+    //printf("RET to %p\n", (void*)new_ip);
 
     *en.ip = (cell*) new_ip;
 }
@@ -464,7 +515,7 @@ builtin_colon(struct environ en,
 
     *en.newword = en.mem->cur;
 
-    printf(":: %p\n", *en.newword);
+    //printf(":: %p\n", *en.newword);
     //*en.newword_sz = 0;
 
     *en.mode = MODE_COMPILE;
@@ -475,7 +526,7 @@ builtin_colon(struct environ en,
 // Pushes the current IP, sets the IP to the body
 void
 docol(struct environ en, struct token tok) {
-    printf("DOCOL %s\n", (*en.xt)->name);
+    //printf("DOCOL %s\n", (*en.xt)->name);
     push(tok, en.rst, (cell) *en.ip);
     *en.ip = (cell*) (*en.xt)->body;
 }
@@ -498,8 +549,8 @@ builtin_scolon(struct environ en,
     en.mem->cur += sizeof(cell);
     //++*en.newword_sz;
 
-    struct entry *prev = *en.dict;
-    printf("New word name: %s\n", *en.newword_name);
+    //struct entry *prev = *en.dict;
+    //printf("New word name: %s\n", *en.newword_name);
     *en.dict = dict_append(en.mem,
                            *en.dict,
                            *en.newword_name,
@@ -507,7 +558,7 @@ builtin_scolon(struct environ en,
                            //*en.newword_sz,
                            *en.newword,
                            docol);
-    printf("Prev word: %p, this word: %p\n", prev, *en.dict);
+    //printf("Prev word: %p, this word: %p\n", prev, *en.dict);
 
     *en.mode = MODE_INTERPRET;
 
@@ -516,27 +567,34 @@ builtin_scolon(struct environ en,
 void
 builtin_immediate(struct environ en,
                   struct token   tok) {
+    (void)tok;
     (*en.dict)->flags |= DICT_FLAG_IMMED;
 }
 
 void
 builtin_componly(struct environ en,
                  struct token   tok) {
+    (void)tok;
     (*en.dict)->flags |= DICT_FLAG_COMPONLY;
 }
 
 void
 builtin_intronly(struct environ en,
                  struct token   tok) {
+    (void)tok;
     (*en.dict)->flags |= DICT_FLAG_INTRONLY;
 }
 
 int
-expect_stack(struct stack *st, struct token tok, size_t num) {
+expect_stack(struct environ en,
+             struct stack *st,
+             struct token tok,
+             size_t num) {
     if (stack_cells(st) < num) {
         char buf[128];
         snprintf(buf, 128, "Expected %lu cells on stack, got %lu", num, stack_cells(st));
         error(tok, buf);
+        throw(en, tok, THROW_STACK_UNDERFLOW);
         return 1;
     }
     return 0;
@@ -545,7 +603,7 @@ expect_stack(struct stack *st, struct token tok, size_t num) {
 void
 builtin_into_r(struct environ en,
                struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     cell c = pop(tok, en.st);
     push(tok, en.rst, c);
 }
@@ -553,7 +611,7 @@ builtin_into_r(struct environ en,
 void
 builtin_from_r(struct environ en,
                struct token   tok) {
-    if (expect_stack(en.rst, tok, 1)) return;
+    if (expect_stack(en, en.rst, tok, 1)) return;
     cell c = pop(tok, en.rst);
     push(tok, en.st, c);
 }
@@ -561,7 +619,7 @@ builtin_from_r(struct environ en,
 void
 builtin_top_r(struct environ en,
               struct token   tok) {
-    if (expect_stack(en.rst, tok, 1)) return;
+    if (expect_stack(en, en.rst, tok, 1)) return;
     cell c = top(tok, en.rst);
     push(tok, en.st, c);
 }
@@ -569,7 +627,7 @@ builtin_top_r(struct environ en,
 void
 builtin_execute(struct environ en,
                 struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     *en.xt = (struct entry*)pop(tok, en.st);
 
     (*en.xt)->code(en, tok);
@@ -578,6 +636,7 @@ builtin_execute(struct environ en,
 void
 builtin_branch(struct environ en,
                struct token   tok) {
+    (void)tok;
     cell off = **en.ip;
     //*en.ip += off;
     *en.ip = (cell*) off;
@@ -586,7 +645,7 @@ builtin_branch(struct environ en,
 void
 builtin_0branch(struct environ en,
                 struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
 
     int cond = pop(tok, en.st);
     cell off = **en.ip;
@@ -603,7 +662,7 @@ builtin_0branch(struct environ en,
 void
 builtin_cells(struct environ en,
               struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     cell num = pop(tok, en.st);
     push(tok, en.st, (cell) (num * sizeof(cell)));
 }
@@ -611,10 +670,10 @@ builtin_cells(struct environ en,
 void
 builtin_allot(struct environ en,
               struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     cell sz = pop(tok, en.st);
     en.mem->cur += sz;
-    printf("ALLOT: %ld\n", sz);
+    //printf("ALLOT: %ld\n", sz);
 }
 
 void
@@ -644,7 +703,7 @@ builtin_mem_end(struct environ en,
 void
 builtin_at(struct environ en,
            struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     cell *addr = (cell*) pop(tok, en.st);
     push(tok, en.st, *addr);
 }
@@ -652,7 +711,7 @@ builtin_at(struct environ en,
 void
 builtin_bat(struct environ en,
            struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     byte *addr = (byte*) pop(tok, en.st);
     push(tok, en.st, (cell) *addr);
 }
@@ -660,24 +719,30 @@ builtin_bat(struct environ en,
 void
 builtin_put(struct environ en,
             struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
 
     cell *addr = (cell*) pop(tok, en.st);
     cell val = pop(tok, en.st);
 
     *addr = val;
-    printf("!: %ld -> %p\n", val, addr);
+    //printf("!: %ld -> %p\n", val, addr);
 }
 
 void
 builtin_bput(struct environ en,
              struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
 
     byte *addr = (byte*) pop(tok, en.st);
     byte val = (byte) pop(tok, en.st);
 
     *addr = val;
+}
+
+void
+builtin_pad(struct environ en,
+            struct token   tok) {
+    push(tok, en.st, (cell) en.pad);
 }
 
 void
@@ -688,15 +753,21 @@ builtin_dict_search(struct environ en,
 
     struct entry *e = dict_search(*en.dict, name.val);
 
-    printf("Tick: (%s) %p -> %p\n", e->name, e, e->next);
+    //printf("Tick: (%s) %p -> %p\n", e->name, e, e->next);
 
     push(tok, en.st, (cell) e);
 }
 
 void
+builtin_dict(struct environ en,
+            struct token   tok) {
+    push(tok, en.st, (cell) *en.dict);
+}
+
+void
 builtin_dict_next(struct environ en,
                   struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     struct entry *e = (struct entry*) pop(tok, en.st);
     push(tok, en.st, (cell) e->next);
 }
@@ -704,7 +775,7 @@ builtin_dict_next(struct environ en,
 void
 builtin_dict_name(struct environ en,
                   struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     struct entry *e = (struct entry*) pop(tok, en.st);
     push(tok, en.st, (cell) e->name);
 }
@@ -712,7 +783,7 @@ builtin_dict_name(struct environ en,
 void
 builtin_dict_flag(struct environ en,
                   struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     struct entry *e = (struct entry*) pop(tok, en.st);
     push(tok, en.st, (cell) e->flags);
 }
@@ -720,7 +791,7 @@ builtin_dict_flag(struct environ en,
 void
 builtin_dict_code(struct environ en,
                   struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     struct entry *e = (struct entry*) pop(tok, en.st);
     push(tok, en.st, (cell) e->code);
 }
@@ -728,7 +799,7 @@ builtin_dict_code(struct environ en,
 void
 builtin_dict_body(struct environ en,
                   struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     struct entry *e = (struct entry*) pop(tok, en.st);
     push(tok, en.st, (cell) e->body);
 }
@@ -736,7 +807,7 @@ builtin_dict_body(struct environ en,
 //void
 //builtin_dict_bdsz(struct environ en,
 //                  struct token   tok) {
-//    if (expect_stack(en.st, tok, 1)) return;
+//    if (expect_stack(en, en.st, tok, 1)) return;
 //    struct entry *e = (struct entry*) pop(tok, en.st);
 //    push(tok, en.st, (cell) e->body_sz);
 //}
@@ -744,14 +815,14 @@ builtin_dict_body(struct environ en,
 void
 builtin_drop(struct environ en,
              struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     (void)pop(tok, en.st);
 }
 
 void
 builtin_dup(struct environ en,
             struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     cell c = top(tok, en.st);
     push(tok, en.st, c);
 }
@@ -759,7 +830,7 @@ builtin_dup(struct environ en,
 void
 builtin_swap(struct environ en,
              struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -770,7 +841,7 @@ builtin_swap(struct environ en,
 void
 builtin_over(struct environ en,
              struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -779,10 +850,24 @@ builtin_over(struct environ en,
     push(tok, en.st, b);
 }
 
+// a b c -- b c a
+void
+builtin_rot(struct environ en,
+             struct token   tok) {
+    if (expect_stack(en, en.st, tok, 2)) return;
+    cell c = pop(tok, en.st);
+    cell b = pop(tok, en.st);
+    cell a = pop(tok, en.st);
+
+    push(tok, en.st, b);
+    push(tok, en.st, c);
+    push(tok, en.st, a);
+}
+
 void
 builtin_add(struct environ en,
             struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -792,7 +877,7 @@ builtin_add(struct environ en,
 void
 builtin_sub(struct environ en,
             struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -802,7 +887,7 @@ builtin_sub(struct environ en,
 void
 builtin_equ(struct environ en,
             struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -810,9 +895,38 @@ builtin_equ(struct environ en,
 }
 
 void
+builtin_not(struct environ en,
+            struct token   tok) {
+    if (expect_stack(en, en.st, tok, 1)) return;
+    cell c = pop(tok, en.st);
+
+    push(tok, en.st, !c);
+}
+
+void
+builtin_and(struct environ en,
+            struct token   tok) {
+    if (expect_stack(en, en.st, tok, 1)) return;
+    cell a = pop(tok, en.st);
+    cell b = pop(tok, en.st);
+
+    push(tok, en.st, a && b);
+}
+
+void
+builtin_or(struct environ en,
+            struct token   tok) {
+    if (expect_stack(en, en.st, tok, 1)) return;
+    cell a = pop(tok, en.st);
+    cell b = pop(tok, en.st);
+
+    push(tok, en.st, a || b);
+}
+
+void
 builtin_less(struct environ en,
              struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -822,7 +936,7 @@ builtin_less(struct environ en,
 void
 builtin_gr(struct environ en,
            struct token   tok) {
-    if (expect_stack(en.st, tok, 2)) return;
+    if (expect_stack(en, en.st, tok, 2)) return;
     cell a = pop(tok, en.st);
     cell b = pop(tok, en.st);
 
@@ -830,34 +944,105 @@ builtin_gr(struct environ en,
 }
 
 void
+builtin_source(struct environ en,
+               struct token   tok) {
+    push(tok, en.st, (cell) en.term->source);
+}
+
+void
+builtin_term_cur(struct environ en,
+                 struct token   tok) {
+    push(tok, en.st, (cell) en.term->cur);
+}
+
+void
+builtin_t2b(struct environ en,
+            struct token   tok) {
+    push(tok, en.st, *en.term->cur);
+    if (*en.term->cur) advance(en.term);
+}
+
+void
+builtin_b2t(struct environ en,
+            struct token   tok) {
+    byte b = (byte)pop(tok, en.st);
+    putchar(b);
+}
+
+void
 builtin_cr(struct environ en,
            struct token   tok) {
-    if (expect_stack(en.st, tok, 0)) return;
+    (void)en;
+    (void)tok;
     putchar('\n');
 }
 
 void
 builtin_dot(struct environ en,
             struct token   tok) {
-    if (expect_stack(en.st, tok, 1)) return;
+    if (expect_stack(en, en.st, tok, 1)) return;
     printf("%ld", pop(tok, en.st));
 }
 
-#include <signal.h>
+void
+builtin_catch(struct environ en,
+              struct token   tok) {
+    (void) tok;
+    *en.catch = *en.ip;
+    *en.catch_st = en.st->cur;
+    *en.catch_rst = en.rst->cur;
+
+    push(tok, en.st, 0);
+}
+
+void
+throw(struct environ en,
+      struct token   tok,
+      cell           val) {
+
+    if (!val) return;
+
+    cell *before = *en.ip;
+
+    *en.ip = *en.catch;
+    en.st->cur =  *en.catch_st;
+    en.rst->cur = *en.catch_rst;
+
+    push(tok, en.st, val);
+
+    // Toplevel catcher
+    if (*en.ip == NULL) {
+        printf("(%d:%d '%s') CAUGHT %ld from %p\n",
+                tok.line+1, tok.col+1, tok.val, val, before);
+    }
+}
+
+void
+builtin_throw(struct environ en,
+              struct token   tok) {
+    if (expect_stack(en, en.st, tok, 1)) return;
+    cell val = pop(tok, en.st);
+
+    throw(en, tok, val);
+}
+
 void
 builtin_stackdump(struct environ en,
-                struct token   tok) {
+                  struct token   tok) {
     printf("(%s %d:%d) initiating stack dump\n", tok.val, tok.line, tok.col);
     printf("      DATA STACK\n");
     for (cell *p = (cell*) en.st->cur; p < (cell*) en.st->begin; p++) {
-        printf("  %16ld %16p\n", *p, (void*)*p);
+        if (*p < 128)
+            printf("  %16ld ('%c') %11p\n", *p, (char)*p, (void*)*p);
+        else
+            printf("  %16ld %16p\n", *p, (void*)*p);
     }
     printf("      RETURN STACK\n");
-    for (cell *p = (cell*) en.st->cur; p < (cell*) en.st->begin; p++) {
+    for (cell *p = (cell*) en.rst->cur; p < (cell*) en.rst->begin; p++) {
         printf("  %16ld %16p\n", *p, (void*)*p);
     }
-    raise(SIGINT);
-    exit(0);
+    //raise(SIGINT);
+    //exit(0);
 }
 
 void
@@ -885,20 +1070,30 @@ builtin_worddump(struct environ en,
     for (struct entry **w = (struct entry**) e->body;
          (*w)->code != builtin_ret; w++) {
 
-        printf("  %s\n", (*w)->name);
+        printf("  %s ", (*w)->name);
 
         if ((*w)->code == builtin_lit) {
-            printf("  -> %ld\n", *(((cell*)w)+1));
+            printf("%ld\n", *(((cell*)w)+1));
             w++;
+        }
+        else if ((*w)->code == builtin_strlit) {
+            char *str = (char *)(w + 1);
+            printf("%s\n", str);
+
+            char *end = str;
+            for (; *end; end++);
+
+            w = ((struct entry**) (end + 1)) - 1; 
         }
         else if ((*w)->code == builtin_branch ||
             (*w)->code == builtin_0branch) {
 
             cell *p = (cell*)*(((cell*)w)+1);
 
-            printf("  -> %p (%ld)\n", p, p - (cell*)w);
+            printf("%p (%ld)\n", p, p - (cell*)w);
             w++;
         }
+        else putchar('\n');
     }
 
 
@@ -906,26 +1101,79 @@ builtin_worddump(struct environ en,
     exit(0);
 }
 
+void
+eval(struct environ en) {
+
+    struct token tok = next(en.term);
+
+    while (tok.val != NULL) {
+        if (!strlen(tok.val)) {
+            tok = next(en.term);
+            continue;
+        }
+        //printf("(%d:%d '%s')\n", tok.line + 1, tok.col + 1, tok.val);
+        handle_token(en, tok);
+
+        tok = next(en.term);
+    }
+}
+
+char *
+readfile(const char *filename) {
+    FILE *f = fopen(filename, "r");
+
+    if (f == NULL) {
+        perror("fopen()");
+        return NULL;
+    }
+
+    char *code = NULL;
+    size_t code_sz = 0;
+
+    while (!feof(f) && !ferror(f)) {
+        code_sz++;
+        code = realloc(code, code_sz);
+        code[code_sz - 1] = fgetc(f);
+    }
+    code[code_sz - 1] = 0;
+
+    fclose(f);
+
+    return code;
+}
+
 int
-main(void) {
-    const char *code = 
-        ": , here ! 1 cells allot ;\n"
-        ": [ 0 mode b! ; immediate componly\n"
-        ": ] 1 mode b! ; intronly\n"
-        ": 'lit [ ' lit dup , , ] ;\n"
-        ": lit, 'lit , , ;\n"
-        ": ['] ' lit, ; immediate componly\n"
-        ": postpone ' lit, ['] , , ; immediate componly\n"
-        ": if postpone 0branch here 0 , ; immediate componly\n"
-        ": else postpone branch here 1 cells + swap ! here 0 , ; immediate componly\n"
-        ": then here swap ! ; immediate componly\n"
-        // (limit index --)
-        ": (do) >r >r ;\n"
-        // (R:index limit -- done?)
-        ": (loop) r> r@ swap 1 + dup >r > ;\n"
-        ": do postpone (do) here ; immediate componly\n"
-        ": loop postpone (loop) compile 0branch , ; immediate componly\n"
-        ": hello 10 i do 111 . cr loop ; hello\n";
+refill(struct tstate *st) {
+    if (!*st->real_cur) return THROW_EOF;
+
+    int i = 0;
+    for(; i < SOURCE_SIZE - 1
+          && (*st->real_cur != '\n')
+          && *st->real_cur; ++st->real_cur, ++i) {
+        st->source[i] = *st->real_cur;
+    }
+
+    ++st->real_cur;
+    st->source[i] = '\n';
+    st->source[i+1] = 0;
+    st->cur = st->source;
+    //printf("Refilled: '%s'\n", st->source);
+
+    return 0;
+}
+
+void
+builtin_refill(struct environ en,
+               struct token   tok) {
+    push(tok, en.st, refill(en.term));
+}
+
+int
+main(int argc, char **argv) {
+    if (argc < 2) {
+        printf("Provide source code files\n");
+        exit(0);
+    }
 
     char *mem_buf = malloc(MEMORY_SIZE);
     struct memory mem = {
@@ -945,17 +1193,15 @@ main(void) {
     char *newword_name = NULL;
     //size_t newword_sz = 0;
     cell *ip = NULL;
+    cell *catch = NULL;
+    char *catch_st = NULL;
+    char *catch_rst = NULL;
     struct entry *xt = NULL;
+    char *pad = malloc(PAD_SIZE);
 
-    char *code_copy = malloc(strlen(code) + 1);
-
-    strcpy(code_copy, code);
-
-    struct tstate st = {
-        0, 0, code_copy
-    };
 
     dict = dict_append_builtin(&mem, dict, "lit", 0, builtin_lit);
+    dict = dict_append_builtin(&mem, dict, "strlit", 0, builtin_strlit);
     dict = dict_append_builtin(&mem, dict, "ret", 0, builtin_ret);
 
     dict = dict_append_builtin(&mem, dict, ">r", 0, builtin_into_r);
@@ -977,7 +1223,9 @@ main(void) {
     dict = dict_append_builtin(&mem, dict, "b@", 0, builtin_bat);
     dict = dict_append_builtin(&mem, dict, "b!", 0, builtin_bput);
 
+    dict = dict_append_builtin(&mem, dict, "pad", 0, builtin_pad);
     dict = dict_append_builtin(&mem, dict, "'", 0, builtin_dict_search);
+    dict = dict_append_builtin(&mem, dict, "dict", 0, builtin_dict);
     dict = dict_append_builtin(&mem, dict, "->next", 0, builtin_dict_next);
     dict = dict_append_builtin(&mem, dict, "->name", 0, builtin_dict_name);
     dict = dict_append_builtin(&mem, dict, "->flag", 0, builtin_dict_flag);
@@ -989,49 +1237,65 @@ main(void) {
     dict = dict_append_builtin(&mem, dict, ";", DICT_FLAG_IMMED, builtin_scolon);
 
     dict = dict_append_builtin(&mem, dict, "immediate", 0, builtin_immediate);
-    dict = dict_append_builtin(&mem, dict, "componly", 0, builtin_componly);
-    dict = dict_append_builtin(&mem, dict, "intronly", 0, builtin_intronly);
+    dict = dict_append_builtin(&mem, dict, "compile-only", 0, builtin_componly);
+    dict = dict_append_builtin(&mem, dict, "interpret-only", 0, builtin_intronly);
 
     dict = dict_append_builtin(&mem, dict, "drop", 0, builtin_drop);
     dict = dict_append_builtin(&mem, dict, "swap", 0, builtin_swap);
     dict = dict_append_builtin(&mem, dict, "over", 0, builtin_over);
+    dict = dict_append_builtin(&mem, dict, "rot", 0, builtin_rot);
     dict = dict_append_builtin(&mem, dict, "dup", 0, builtin_dup);
 
     dict = dict_append_builtin(&mem, dict, "+", 0, builtin_add);
     dict = dict_append_builtin(&mem, dict, "-", 0, builtin_sub);
     dict = dict_append_builtin(&mem, dict, "=", 0, builtin_equ);
+    dict = dict_append_builtin(&mem, dict, "not", 0, builtin_not);
+    dict = dict_append_builtin(&mem, dict, "and", 0, builtin_and);
+    dict = dict_append_builtin(&mem, dict, "or", 0, builtin_or);
     dict = dict_append_builtin(&mem, dict, "<", 0, builtin_less);
     dict = dict_append_builtin(&mem, dict, ">", 0, builtin_gr);
 
+    dict = dict_append_builtin(&mem, dict, "refill", 0, builtin_refill);
+    dict = dict_append_builtin(&mem, dict, "source", 0, builtin_source);
+    dict = dict_append_builtin(&mem, dict, "&t", 0, builtin_term_cur);
+    dict = dict_append_builtin(&mem, dict, "t>b", 0, builtin_t2b);
+    dict = dict_append_builtin(&mem, dict, "b>t", 0, builtin_b2t);
     dict = dict_append_builtin(&mem, dict, "cr", 0, builtin_cr);
     dict = dict_append_builtin(&mem, dict, ".", 0, builtin_dot);
+
+    dict = dict_append_builtin(&mem, dict, "catch", 0, builtin_catch);
+    dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);
 
     dict = dict_append_builtin(&mem, dict, "stackdump", 0, builtin_stackdump);
     dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);
 
+    for (int i = 1; i < argc; i++) {
+        char *code = readfile(argv[i]);
+        if (code == NULL) continue;
 
-    struct token tok = next(&st);
+        struct tstate st = {0};
+        st.real_cur = code;
 
-    while (tok.val != NULL) {
-        if (!strlen(tok.val)) {
-            tok = next(&st);
-            continue;
+        while (!refill(&st)) {
+            struct environ en = {
+                 &st,
+                 &mem,
+                 &stk,
+                 &rstk,
+                 &dict,
+                 &mode,
+                 pad,
+                 &newword_name,
+                 &newword,
+                 &ip,
+                 &xt,
+                 &catch,
+                 &catch_st,
+                 &catch_rst
+            };
+            eval(en);
         }
-        //printf("(%d:%d '%s')\n", tok.line + 1, tok.col + 1, tok.val);
-        handle_token((struct environ) {
-                &st, 
-                &mem,
-                &stk,
-                &rstk,
-                &dict,
-                &mode,
-                &newword_name,
-                &newword,
-                //&newword_sz,
-                &ip,
-                &xt
-        }, tok);
-
-        tok = next(&st);
+        free(code);
     }
+
 }
