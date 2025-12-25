@@ -86,3 +86,5 @@
 
 : t<< 10 parse type cr ;
 \ t<< One two three four?
+: test 1000 0 do 1 loop ;
+\ test
