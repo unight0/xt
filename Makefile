@@ -1,8 +1,8 @@
 
-CXX = gcc
+CC = gcc
 LD = gcc
-CFLAGS = -g -Wall -Wextra
-LDFLAGS =
+CFLAGS = -Wall -Wextra -g -fsanitize=address
+LDFLAGS = -fsanitize=address
 TARGET = xt
 
 SRCS = $(wildcard *.c)
@@ -12,7 +12,7 @@ $(TARGET): $(OBJS)
 	$(LD) $(LDFLAGS) $^ -o $@
 
 $(OBJS): $(SRCS)
-	$(CXX) $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) -c $<
 
 clean:
 	rm $(OBJS)

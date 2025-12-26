@@ -30,18 +30,32 @@
 #define THROW_UNDEFINED_WORD   -13
 #define THROW_COMPONLY_WORD    -14
 #define THROW_EOF              -39
-#define THROW_INTRONLY_WORD    -9998
-#define THROW_OUT_OF_MEM       -9999
+#define THROW_FILE_NONEXISTENT -996
+#define THROW_INVALID_ARGUMENT -997
+#define THROW_INTRONLY_WORD    -998
+#define THROW_OUT_OF_MEM       -999
 
 typedef uint64_t cell;
 typedef uint8_t  byte;
 
-struct tstate {
+// TODO: move away from FILE* to fds
+// + Some things just translate directly
+// + Can actually check if fd is valid,
+//   invalid FILE* just point ot random
+//   memory, thus are unverifiable and 
+//   ultimately lead to segfaults
+// - Cannot use fputs for refilling
+struct input {
     char  source[SOURCE_SIZE];
-    char *real_cur;
+    FILE *source_file;
     int   line;
     int   col;
     char *cur;
+};
+
+struct inputs {
+    size_t num;
+    struct input inps[];
 };
 
 struct token {
@@ -63,7 +77,6 @@ struct stack {
     char *end;
 };
 
-
 struct environ;
 typedef void (builtin (struct environ en, struct token));
 
@@ -75,8 +88,18 @@ struct entry {
     char         *body;
 };
 
+// This is a huge struct that is passed by value.
+// Besides, we have so many double pointers that it
+// would make sense to just pass the *pointer* to environment
+// and story single pointers within the struct.
+// But it does require a lot of fixes...
+
+// TODO (1): pass environment by pointer
+// TODO (2) make stuff global?
+
 struct environ {
-    struct tstate *term;
+    struct inputs **inps;
+    struct input  **inpt;
     struct memory *mem;
     struct stack  *st;
     struct stack  *rst;
@@ -93,12 +116,45 @@ struct environ {
     cell         **catch;
     char         **catch_st;
     char         **catch_rst;
+    char          *terminate;
 };
 
 void throw(struct environ, struct token, cell);
 
+//struct inputs {
+//    size_t num;
+//    struct input inps[];
+//};
+
+struct inputs *
+inputs_append(struct inputs *inps, struct input inp) {
+    inps->num++;
+    inps = realloc(inps,
+                sizeof(struct inputs) +
+                //sizeof(size_t) +
+                sizeof(struct input) * inps->num);
+    inps->inps[inps->num - 1] = inp;
+    return inps;
+}
+
+struct inputs *
+inputs_pop(struct inputs *inps) {
+    inps->num--;
+    inps = realloc(inps,
+            sizeof(struct inputs) + 
+            //sizeof(size_t) +
+            sizeof(struct input) * inps->num);
+    return inps;
+}
+
+struct input *
+inputs_top(struct inputs *inps) {
+    if (inps->num == 0) return NULL;
+    return &inps->inps[inps->num - 1];
+}
+
 void
-advance(struct tstate *st) {
+advance(struct input *st) {
     //assert(*st->cur && "Cannot advance past the end of string");
     st->col++;
     if (*st->cur == '\n') {
@@ -109,13 +165,12 @@ advance(struct tstate *st) {
 }
 
 struct token
-next(struct tstate *st) {
+next(struct input *st) {
     if (!*st->cur) return (struct token) {0, 0, NULL};
 
     while (isspace(*st->cur) && *st->cur) {
         advance(st);
     }
-
     char *val = st->cur;
     const int line = st->line;
     const int col = st->col;
@@ -536,7 +591,7 @@ builtin_colon(struct environ en,
         return;
     }
 
-    struct token name = next(en.term);
+    struct token name = next(*en.inpt);
 
     if (name.val == NULL) {
         error(tok, "No name provided");
@@ -707,6 +762,7 @@ builtin_allot(struct environ en,
     if (expect_stack(en, en.st, tok, 1)) return;
     cell sz = pop(en, tok, en.st);
     en.mem->cur += sz;
+    check_mem(en, tok);
     //printf("ALLOT: %ld\n", sz);
 }
 
@@ -783,7 +839,7 @@ void
 builtin_dict_search(struct environ en,
                     struct token   tok) {
 
-    struct token name = next(en.term);
+    struct token name = next(*en.inpt);
 
     struct entry *e = dict_search(*en.dict, name.val);
 
@@ -909,6 +965,26 @@ builtin_add(struct environ en,
 }
 
 void
+builtin_mul(struct environ en,
+            struct token   tok) {
+    if (expect_stack(en, en.st, tok, 2)) return;
+    cell a = pop(en, tok, en.st);
+    cell b = pop(en, tok, en.st);
+
+    push(en, tok, en.st, a * b);
+}
+
+void
+builtin_div(struct environ en,
+            struct token   tok) {
+    if (expect_stack(en, en.st, tok, 2)) return;
+    cell b = pop(en, tok, en.st);
+    cell a = pop(en, tok, en.st);
+
+    push(en, tok, en.st, a/b);
+}
+
+void
 builtin_sub(struct environ en,
             struct token   tok) {
     if (expect_stack(en, en.st, tok, 2)) return;
@@ -980,20 +1056,20 @@ builtin_gr(struct environ en,
 void
 builtin_source(struct environ en,
                struct token   tok) {
-    push(en, tok, en.st, (cell) en.term->source);
+    push(en, tok, en.st, (cell) (*en.inpt)->source);
 }
 
 void
-builtin_term_cur(struct environ en,
+builtin_src_cur(struct environ en,
                  struct token   tok) {
-    push(en, tok, en.st, (cell) en.term->cur);
+    push(en, tok, en.st, (cell) (*en.inpt)->cur);
 }
 
 void
-builtin_t2b(struct environ en,
-            struct token   tok) {
-    push(en, tok, en.st, *en.term->cur);
-    if (*en.term->cur) advance(en.term);
+builtin_src2b(struct environ en,
+              struct token   tok) {
+    push(en, tok, en.st, *(*en.inpt)->cur);
+    if (*(*en.inpt)->cur) advance(*en.inpt);
 }
 
 void
@@ -1015,7 +1091,69 @@ void
 builtin_dot(struct environ en,
             struct token   tok) {
     if (expect_stack(en, en.st, tok, 1)) return;
-    printf("%ld", pop(en, tok, en.st));
+    cell c = pop(en, tok, en.st);
+    printf("%ld", c);
+}
+
+int refill(struct input *st);
+void
+builtin_file_as_source(struct environ en,
+                       struct token   tok) {
+    if (expect_stack(en, en.st, tok, 1)) return;
+    FILE *f = (FILE*)pop(en, tok, en.st);
+    struct input new_in = {0};
+    new_in.source_file = f;
+    *en.inps = inputs_append(*en.inps, new_in);
+    *en.inpt = inputs_top(*en.inps); 
+    refill(*en.inpt);
+}
+
+void
+builtin_open_file(struct environ en,
+                  struct token   tok) {
+    if (expect_stack(en, en.st, tok, 2)) return;
+    cell method = pop(en, tok, en.st);
+    char *filename = (char*)pop(en, tok, en.st);
+    char *s_method = NULL;
+
+    switch(method) {
+        case 0:
+            s_method = "rb";
+            break;
+        case 1:
+            // Don't truncate files
+            s_method = "ab";
+            break;
+        case 2:
+            s_method = "rwb";
+            break;
+        default:
+            push(en, tok, en.st, 0);
+            push(en, tok, en.st, THROW_INVALID_ARGUMENT);
+            return;
+
+    }
+
+    FILE *f = fopen(filename, s_method);
+
+    if (f == NULL) {
+        push(en, tok, en.st, 0);
+        // This is not the only possible reason...
+        push(en, tok, en.st, THROW_FILE_NONEXISTENT);
+        return;
+    }
+
+    push(en, tok, en.st, (cell)f);
+    push(en, tok, en.st, 0);
+}
+
+void
+builtin_close_file(struct environ en,
+                   struct token   tok) {
+    if (expect_stack(en, en.st, tok, 1)) return;
+    FILE *file = (FILE*)pop(en, tok, en.st);
+
+    push(en, tok, en.st, !!fclose(file));
 }
 
 void
@@ -1046,6 +1184,8 @@ throw(struct environ en,
     if (*en.ip == NULL) {
         printf("(%d:%d '%s') CAUGHT %ld from %p\n",
                 tok.line+1, tok.col+1, tok.val, val, before);
+        // Error wasn't caught, terminate source execution
+        *en.terminate = 1;
         return;
     }
 
@@ -1085,7 +1225,7 @@ builtin_worddump(struct environ en,
                  struct token   tok) {
     printf("(%s %d:%d) initiating word dump\n", tok.val, tok.line, tok.col);
 
-    struct token tk = next(en.term);
+    struct token tk = next(*en.inpt);
     if (tk.val == NULL || !strlen(tk.val)) {
         error(tok, "No argument provided for worddump!");
         raise(SIGINT);
@@ -1138,60 +1278,56 @@ builtin_worddump(struct environ en,
 void
 eval(struct environ en) {
 
-    struct token tok = next(en.term);
+    struct token tok = next(*en.inpt);
 
     while (tok.val != NULL) {
         if (!strlen(tok.val)) {
-            tok = next(en.term);
+            tok = next(*en.inpt);
             continue;
         }
         //printf("(%d:%d '%s')\n", tok.line + 1, tok.col + 1, tok.val);
         handle_token(en, tok);
 
-        tok = next(en.term);
+        if (*en.terminate) break;
+
+        tok = next(*en.inpt);
     }
 }
 
-char *
-readfile(const char *filename) {
-    FILE *f = fopen(filename, "r");
-
-    if (f == NULL) {
-        perror("fopen()");
-        return NULL;
-    }
-
-    char *code = NULL;
-    size_t code_sz = 0;
-
-    while (!feof(f) && !ferror(f)) {
-        code_sz++;
-        code = realloc(code, code_sz);
-        code[code_sz - 1] = fgetc(f);
-    }
-    code[code_sz - 1] = 0;
-
-    fclose(f);
-
-    return code;
-}
+//char *
+//readfile(const char *filename) {
+//    FILE *f = fopen(filename, "r");
+//
+//    if (f == NULL) {
+//        perror("fopen()");
+//        return NULL;
+//    }
+//
+//    char *code = NULL;
+//    size_t code_sz = 0;
+//
+//    while (!feof(f) && !ferror(f)) {
+//        code_sz++;
+//        code = realloc(code, code_sz);
+//        code[code_sz - 1] = fgetc(f);
+//    }
+//    code[code_sz - 1] = 0;
+//
+//    fclose(f);
+//
+//    return code;
+//}
 
 int
-refill(struct tstate *st) {
-    if (!*st->real_cur) return THROW_EOF;
+refill(struct input *st) {
+    if (feof(st->source_file)) return THROW_EOF;
 
-    int i = 0;
-    for(; i < SOURCE_SIZE - 1
-          && (*st->real_cur != '\n')
-          && *st->real_cur; ++st->real_cur, ++i) {
-        st->source[i] = *st->real_cur;
-    }
+    if (fgets(st->source, SOURCE_SIZE, st->source_file) == NULL)
+        return THROW_EOF;
 
-    ++st->real_cur;
-    st->source[i] = '\n';
-    st->source[i+1] = 0;
     st->cur = st->source;
-    //printf("Refilled: '%s'\n", st->source);
+
+    //printf("Refilled: %s\n", st->source);
 
     return 0;
 }
@@ -1199,7 +1335,7 @@ refill(struct tstate *st) {
 void
 builtin_refill(struct environ en,
                struct token   tok) {
-    push(en, tok, en.st, refill(en.term));
+    push(en, tok, en.st, refill(*en.inpt));
 }
 
 int
@@ -1233,7 +1369,9 @@ main(int argc, char **argv) {
     char *catch_rst = rstk.cur;
     struct entry *xt = NULL;
     char *pad = malloc(PAD_SIZE);
+    char terminate = 0;
 
+    // Hide these words somehow
     dict = dict_append_builtin(&mem, dict, "lit", 0, builtin_lit);
     dict = dict_append_builtin(&mem, dict, "strlit", 0, builtin_strlit);
     dict = dict_append_builtin(&mem, dict, "ret", 0, builtin_ret);
@@ -1281,7 +1419,9 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "dup", 0, builtin_dup);
 
     dict = dict_append_builtin(&mem, dict, "+", 0, builtin_add);
+    dict = dict_append_builtin(&mem, dict, "*", 0, builtin_mul);
     dict = dict_append_builtin(&mem, dict, "-", 0, builtin_sub);
+    dict = dict_append_builtin(&mem, dict, "/", 0, builtin_div);
     dict = dict_append_builtin(&mem, dict, "=", 0, builtin_equ);
     dict = dict_append_builtin(&mem, dict, "not", 0, builtin_not);
     dict = dict_append_builtin(&mem, dict, "and", 0, builtin_and);
@@ -1291,11 +1431,16 @@ main(int argc, char **argv) {
 
     dict = dict_append_builtin(&mem, dict, "refill", 0, builtin_refill);
     dict = dict_append_builtin(&mem, dict, "source", 0, builtin_source);
-    dict = dict_append_builtin(&mem, dict, "&t", 0, builtin_term_cur);
-    dict = dict_append_builtin(&mem, dict, "t>b", 0, builtin_t2b);
+    dict = dict_append_builtin(&mem, dict, "&src", 0, builtin_src_cur);
+    dict = dict_append_builtin(&mem, dict, "src>b", 0, builtin_src2b);
     dict = dict_append_builtin(&mem, dict, "b>t", 0, builtin_b2t);
     dict = dict_append_builtin(&mem, dict, "cr", 0, builtin_cr);
     dict = dict_append_builtin(&mem, dict, ".", 0, builtin_dot);
+
+    dict = dict_append_builtin(&mem, dict, "file-as-source", 0, builtin_file_as_source);
+    dict = dict_append_builtin(&mem, dict, "file-open", 0, builtin_open_file);
+    //dict = dict_append_builtin(&mem, dict, "read-file", 0, builtin_refill);
+    dict = dict_append_builtin(&mem, dict, "file-close", 0, builtin_close_file);
 
     dict = dict_append_builtin(&mem, dict, "catch", 0, builtin_catch);
     dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);
@@ -1304,6 +1449,7 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);
 
     struct environ en = {
+         NULL,
          NULL,
          &mem,
          &stk,
@@ -1317,36 +1463,65 @@ main(int argc, char **argv) {
          &xt,
          &catch,
          &catch_st,
-         &catch_rst
+         &catch_rst,
+         &terminate
     };
-    for (int i = 1; i < argc; i++) {
-        char *code = readfile(argv[i]);
-        if (code == NULL) continue;
 
-        struct tstate st = {0};
-        st.real_cur = code;
+    struct inputs *inps = malloc(sizeof(struct input));
+    inps->num = 0;
 
-        // NOTE: this naming is confusing.
-        // struct tstate is the state of the input,
-        // not necessairly terminal
-        en.term = &st;
+    struct input term = {0};
+    term.source_file = stdin;
+    inps = inputs_append(inps, term);
 
-        while (!refill(&st)) {
-            eval(en);
+    // Get the expected behaviour of files begin executed left-to-right
+    for (int i = argc - 1; i > 0; i--) {
+        FILE *file = fopen(argv[i], "r");
+        if (file == NULL) {
+            perror("fopen()");
+            continue;
         }
-        free(code);
+        struct input in = {0};
+        in.source_file = file;
+        inps = inputs_append(inps, in);
     }
 
-    for (;!feof(stdin) && !ferror(stdin);) {
-        printf("> ");
-        struct tstate st = {0};
-        fgets(st.source, SOURCE_SIZE, stdin);
-        st.cur = st.source;
-        st.real_cur = st.source + strlen(st.source);
-        en.term = &st;
+    en.inps = &inps;
 
-        // We assume that there's only one line, since
-        // fgets should return only one line
-        eval(en);
+    for (;;) {
+        struct input *in = inputs_top(inps);
+        en.inpt = &in;
+
+        // End of all sources
+        if (in == NULL) break;
+
+        if (in->source_file == stdin)
+            printf("> ");
+
+        while (!refill(inputs_top(inps))) {
+            eval(en);
+
+            in = inputs_top(inps);
+
+            if (terminate) {
+                terminate = 0;
+                break;
+            }
+            if (in->source_file == stdin)
+                printf("> ");
+        }
+
+        // Input may have changed!
+        in = inputs_top(inps);
+
+        if (feof(in->source_file) || ferror(in->source_file)) {
+            fclose(in->source_file);
+            inps = inputs_pop(inps);
+        }
     }
+
+    free(inps);
+
+    free(mem.mem);
+    free(pad);
 }

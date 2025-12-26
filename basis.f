@@ -17,16 +17,15 @@
 
 : != = not ;
 
-: \ while t>b dup 10 != and begin done ; immediate
-
+: \ while src>b dup 10 != and begin done ; immediate
 \ ('X' parse <cc>X -- str-ptr )
 : parse
-  &t swap
-  while t>b over over != begin
-      not if refill throw then
+  &src swap
+  while src>b over over != begin
+    not if refill throw then
   done
   drop drop
-  0 &t 1 - b!
+  0 &src 1 - b!
 ;
 : ( ')' parse drop ; immediate
 ( this is a 
@@ -35,6 +34,11 @@
 \ LIMIT INDEX do
 \   <body>
 \ loop
+\ Note: do...loop is slow. Countdown from a million to zero while printing
+\ 'hi\n' was 3.7 seconds with do...loop and only 3.2 seconds with
+\ while...begin...done. This performance is on par with python.
+\ Not bad, since this is an interpreted language with bytecode (so-to-say)
+\ compilation. But do...loop needs to be rewritten.
 ( limit index R:ret-ptr -- R:index limit ret-ptr )
 : (do) r> swap >r swap >r >r ; 
 ( R:index limit ret-ptr -- not-done? )
@@ -53,7 +57,9 @@
 ( s -- )
 : type while dup b@ 0 != begin dup b@ b>t 1 + done drop ;
 ( -- )
-: words dict while dup 0 != begin dup ->name type 32 b>t ->next done drop 10 b>t ;
+: words dict while dup 0 != begin dup ->name type 32 b>t ->next done drop cr ;
+( -- )
+: count-words 0 dict while dup 0 != begin swap 1 + swap ->next done drop ;
 
 ( str -- len )
 : strlen
@@ -63,24 +69,30 @@
   done
   drop
 ;
-( dest src -- dest )
+( src dest -- dest )
 : strcpy
-  \ Keep the inital dest pointer
-  swap dup rot
-  while dup b@ begin
+  dup rot swap
+  while over b@ begin
     over over
-    b@ swap b!
+    swap b@ swap b!
     1 + swap 1 + swap
   done
   drop 0 swap b!
 ;
+\ Compile string push into a word
 ( s" <str>" -- str-ptr )
-: s" 
-  ['] strlit ,
-  while t>b dup dup '"' != and begin b, done
-  0 b,
-  drop
+: s"  ['] strlit ,
+  '"' parse here strcpy strlen 1 + allot
 ; immediate compile-only
+: mem-report mem-used . '/' b>t mem-total . s"  bytes used" type cr ;
+\ Works similar to s", but for interpretation mode
+( $ <str>" -- str-ptr)
+: $" '"' parse here strcpy dup strlen 1 + allot ; interpret-only
 : .( ')' parse type ; immediate
 
-: mem-report mem-used . '/' b>t mem-total . s"  bytes used" type cr ;
+: r/o 0 ;
+: w/o 1 ;
+: r/w 2 ;
+
+$" test.f" r/o file-open throw 
+               file-as-source throw
