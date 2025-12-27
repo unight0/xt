@@ -5,6 +5,9 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #define DICT_FLAG_IMMED    1
 #define DICT_FLAG_COMPONLY 1 << 1
@@ -29,6 +32,7 @@
 //#define THROW_RSTACK_UNDERFLOW -6
 #define THROW_UNDEFINED_WORD   -13
 #define THROW_COMPONLY_WORD    -14
+#define THROW_IO_ERR           -37
 #define THROW_EOF              -39
 #define THROW_FILE_NONEXISTENT -996
 #define THROW_INVALID_ARGUMENT -997
@@ -47,7 +51,7 @@ typedef uint8_t  byte;
 // - Cannot use fputs for refilling
 struct input {
     char  source[SOURCE_SIZE];
-    FILE *source_file;
+    int   source_file;
     int   line;
     int   col;
     char *cur;
@@ -92,6 +96,7 @@ struct entry {
 // + Less passing around of stuff
 // - Cannot run several interpreter instances within
 //   single program state
+//   (Do we actually need that?)
 struct environ {
     struct inputs *inps;
     struct input  *inpt;
@@ -104,7 +109,6 @@ struct environ {
     /* Used for compilation mode */
     char          *newword_name;
     char          *newword;
-    //size_t        *newword_sz;
     /* Inner interpreter */
     cell          *ip;
     struct entry  *xt; 
@@ -114,12 +118,7 @@ struct environ {
     char           terminate;
 };
 
-void throw(struct environ *, struct token, cell);
-
-//struct inputs {
-//    size_t num;
-//    struct input inps[];
-//};
+void throw(struct environ*, struct token, cell);
 
 struct inputs *
 inputs_append(struct inputs *inps, struct input inp) {
@@ -1074,7 +1073,7 @@ void
 builtin_b2t(struct environ *en,
             struct token   tok) {
     byte b = (byte)pop(en, tok, &en->st);
-    putchar(b);
+    write(STDOUT_FILENO, &b, 1);
 }
 
 void
@@ -1082,7 +1081,7 @@ builtin_cr(struct environ *en,
            struct token   tok) {
     (void)en;
     (void)tok;
-    putchar('\n');
+    write(STDOUT_FILENO, "\n", 1);
 }
 
 void
@@ -1090,20 +1089,39 @@ builtin_dot(struct environ *en,
             struct token   tok) {
     if (expect_stack(en, &en->st, tok, 1)) return;
     cell c = pop(en, tok, &en->st);
-    printf("%ld", c);
+    char buf[256];
+    snprintf(buf, 256, "%ld", c);
+    write(STDOUT_FILENO, buf, strlen(buf));
 }
 
 int refill(struct input *st);
+int
+check_fd_readable(int fd) {
+    struct stat st;
+    if (fstat(fd, &st)) return 0;
+    // There's nothing like S_ISREADABLE...
+    // Maybe somehow check otherwise?
+
+    return 1;
+}
 void
 builtin_file_as_source(struct environ *en,
                        struct token   tok) {
     if (expect_stack(en, &en->st, tok, 1)) return;
-    FILE *f = (FILE*)pop(en, tok, &en->st);
+    int f = (int)pop(en, tok, &en->st);
+
+    if (!check_fd_readable(f)) {
+        push(en, tok, &en->st, THROW_IO_ERR);
+        return;
+    }
+
     struct input new_in = {0};
     new_in.source_file = f;
     en->inps = inputs_append(en->inps, new_in);
     en->inpt = inputs_top(en->inps); 
     refill(en->inpt);
+
+    push(en, tok, &en->st, 0);
 }
 
 void
@@ -1112,18 +1130,18 @@ builtin_open_file(struct environ *en,
     if (expect_stack(en, &en->st, tok, 2)) return;
     cell method = pop(en, tok, &en->st);
     char *filename = (char*)pop(en, tok, &en->st);
-    char *s_method = NULL;
+    int s_method = 0;
 
     switch(method) {
         case 0:
-            s_method = "rb";
+            s_method = O_RDONLY;
             break;
         case 1:
             // Don't truncate files
-            s_method = "ab";
+            s_method = O_WRONLY | O_APPEND | O_CREAT;
             break;
         case 2:
-            s_method = "rwb";
+            s_method = O_RDWR | O_CREAT;
             break;
         default:
             push(en, tok, &en->st, 0);
@@ -1132,9 +1150,9 @@ builtin_open_file(struct environ *en,
 
     }
 
-    FILE *f = fopen(filename, s_method);
+    int f = open(filename, s_method);
 
-    if (f == NULL) {
+    if (f < 0) {
         push(en, tok, &en->st, 0);
         // This is not the only possible reason...
         push(en, tok, &en->st, THROW_FILE_NONEXISTENT);
@@ -1149,9 +1167,9 @@ void
 builtin_close_file(struct environ *en,
                    struct token   tok) {
     if (expect_stack(en, &en->st, tok, 1)) return;
-    FILE *file = (FILE*)pop(en, tok, &en->st);
+    int file = (int)pop(en, tok, &en->st);
 
-    push(en, tok, &en->st, !!fclose(file));
+    push(en, tok, &en->st, !!close(file));
 }
 
 void
@@ -1182,6 +1200,7 @@ throw(struct environ *en,
     if (en->ip == NULL) {
         printf("(%d:%d '%s') CAUGHT %ld from %p\n",
                 tok.line+1, tok.col+1, tok.val, val, before);
+        fflush(stdout);
         // Error wasn't caught, terminate source execution
         en->terminate = 1;
         return;
@@ -1214,6 +1233,7 @@ builtin_stackdump(struct environ *en,
     for (cell *p = (cell*) en->rst.cur; p < (cell*) en->rst.begin; p++) {
         printf("  %16ld %16p\n", *p, (void*)*p);
     }
+    fflush(stdout);
     //raise(SIGINT);
     //exit(0);
 }
@@ -1268,7 +1288,7 @@ builtin_worddump(struct environ *en,
         else putchar('\n');
     }
 
-
+    fflush(stdout);
     //raise(SIGINT);
     //exit(0);
 }
@@ -1318,10 +1338,32 @@ eval(struct environ *en) {
 
 int
 refill(struct input *st) {
-    if (feof(st->source_file)) return THROW_EOF;
+    //if (eof(st->source_file)) return THROW_EOF;
 
-    if (fgets(st->source, SOURCE_SIZE, st->source_file) == NULL)
-        return THROW_EOF;
+    //if (fgets(st->source, SOURCE_SIZE, st->source_file) == NULL)
+    //    return THROW_EOF;
+
+    //printf("Refilling from %d\n", st->source_file);
+    size_t i = 0;
+
+    for (; i < SOURCE_SIZE - 1; i++) {
+        char c;
+        int got = read(st->source_file, &c, 1);
+        if (got == 0) {
+            //printf("Throw EOF!\n");
+            close(st->source_file);
+            return THROW_EOF;
+        }
+        if (got < 0) {
+            //printf("Throw IO ERROR!\n");
+            close(st->source_file);
+            return THROW_IO_ERR;
+        }
+        st->source[i] = c;
+        if (c == '\n') break;
+    }
+
+    st->source[i+1] = 0;
 
     st->cur = st->source;
 
@@ -1481,14 +1523,14 @@ main(int argc, char **argv) {
     inps->num = 0;
 
     struct input term = {0};
-    term.source_file = stdin;
+    term.source_file = STDIN_FILENO;
     inps = inputs_append(inps, term);
 
     // Get the expected behaviour of files begin executed left-to-right
     for (int i = argc - 1; i > 0; i--) {
-        FILE *file = fopen(argv[i], "r");
-        if (file == NULL) {
-            perror("fopen()");
+        int file = open(argv[i], O_RDONLY);
+        if (file < 0) {
+            perror("open()");
             continue;
         }
         struct input in = {0};
@@ -1499,38 +1541,35 @@ main(int argc, char **argv) {
     en.inps = inps;
 
     for (;;) {
-        struct input *in = inputs_top(inps);
+        struct input *in = inputs_top(en.inps);
         en.inpt = in;
 
         // End of all sources
         if (in == NULL) break;
 
-        if (in->source_file == stdin)
-            printf("> ");
+        if (in->source_file == STDIN_FILENO) {
+            write(STDOUT_FILENO, "> ", 2);
+        }
 
-        while (!refill(inputs_top(inps))) {
+        while (!refill(inputs_top(en.inps))) {
             eval(&en);
 
-            in = inputs_top(inps);
+            in = inputs_top(en.inps);
 
             if (en.terminate) {
                 en.terminate = 0;
-                break;
+                if (in->source_file != STDIN_FILENO) break;
+                else continue;
             }
-            if (in->source_file == stdin)
-                printf("> ");
+            if (in->source_file == STDIN_FILENO) {
+                write(STDOUT_FILENO, "> ", 2);
+            }
         }
 
-        // Input may have changed!
-        in = inputs_top(inps);
-
-        if (feof(in->source_file) || ferror(in->source_file)) {
-            fclose(in->source_file);
-            inps = inputs_pop(inps);
-        }
+        en.inps = inputs_pop(en.inps);
     }
 
-    free(inps);
+    free(en.inps);
 
     free(mem.mem);
     free(pad);

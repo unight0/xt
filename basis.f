@@ -94,6 +94,4 @@
 : w/o 1 ;
 : r/w 2 ;
 
-\ $" test.f" r/o file-open throw 
-\              file-as-source throw
-\ 
+: include r/o file-open throw file-as-source throw ;
