@@ -1124,38 +1124,70 @@ builtin_file_as_source(struct environ *en,
     push(en, tok, &en->st, 0);
 }
 
+int
+mode_by_method(int m) {
+    //printf("Method: %d\n", m);
+    switch(m) {
+        case 0:
+            return O_RDONLY | O_CREAT;
+        case 1:
+            // Don't truncate files
+            return O_WRONLY | O_APPEND | O_CREAT;
+        case 2:
+            return O_RDWR | O_CREAT;
+    }
+    return 0;
+}
+
 void
 builtin_open_file(struct environ *en,
                   struct token   tok) {
     if (expect_stack(en, &en->st, tok, 2)) return;
     cell method = pop(en, tok, &en->st);
     char *filename = (char*)pop(en, tok, &en->st);
-    int s_method = 0;
-
-    switch(method) {
-        case 0:
-            s_method = O_RDONLY;
-            break;
-        case 1:
-            // Don't truncate files
-            s_method = O_WRONLY | O_APPEND | O_CREAT;
-            break;
-        case 2:
-            s_method = O_RDWR | O_CREAT;
-            break;
-        default:
-            push(en, tok, &en->st, 0);
-            push(en, tok, &en->st, THROW_INVALID_ARGUMENT);
-            return;
-
+    int mode = mode_by_method(method);
+    
+    if (mode == 0) {
+        push(en, tok, &en->st, (cell)-1);
+        push(en, tok, &en->st, THROW_INVALID_ARGUMENT);
+        return;
     }
 
-    int f = open(filename, s_method);
+    int f = open(filename, mode);
 
     if (f < 0) {
-        push(en, tok, &en->st, 0);
+        push(en, tok, &en->st, -1);
         // This is not the only possible reason...
         push(en, tok, &en->st, THROW_FILE_NONEXISTENT);
+        return;
+    }
+
+    push(en, tok, &en->st, (cell)f);
+    push(en, tok, &en->st, 0);
+}
+
+void
+builtin_file_create(struct environ *en,
+                    struct token   tok) {
+    if (expect_stack(en, &en->st, tok, 2)) return;
+    cell method =  pop(en, tok, &en->st);
+    char *filename = (char*)pop(en, tok, &en->st);
+    int mode = mode_by_method(method);
+
+    if (mode == 0) {
+        push(en, tok, &en->st, (cell)-1);
+        push(en, tok, &en->st, THROW_INVALID_ARGUMENT);
+        return;
+    }
+
+    int f = open(filename, mode | O_CREAT | O_TRUNC,
+                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
+    if (f < 0) {
+        perror("open()");
+        push(en, tok, &en->st, -1);
+        // Which error code to throw?
+        push(en, tok, &en->st, THROW_IO_ERR);
         return;
     }
 
@@ -1170,6 +1202,81 @@ builtin_close_file(struct environ *en,
     int file = (int)pop(en, tok, &en->st);
 
     push(en, tok, &en->st, !!close(file));
+}
+
+void
+builtin_file_size(struct environ *en,
+                  struct token   tok) {
+    if(expect_stack(en, &en->st, tok, 1)) return;
+    int fd = (int)pop(en, tok, &en->st);
+
+    off_t off = lseek(fd, 0, SEEK_CUR);
+
+    if (off < 0) {
+        push(en, tok, &en->st, 0);
+        push(en, tok, &en->st, THROW_IO_ERR);
+        return;
+    }
+
+    if (lseek(fd, 0, SEEK_SET)) {
+        push(en, tok, &en->st, 0);
+        push(en, tok, &en->st, THROW_IO_ERR);
+        return;
+    }
+
+    off_t end = lseek(fd, 0, SEEK_END);
+
+    if (end < 0) {
+        push(en, tok, &en->st, 0);
+        push(en, tok, &en->st, THROW_IO_ERR);
+        return;
+    }
+
+    if (lseek(fd, off, SEEK_SET)) {
+        push(en, tok, &en->st, 0);
+        push(en, tok, &en->st, THROW_IO_ERR);
+        return;
+    }
+
+    push(en, tok, &en->st, (cell)end);
+    push(en, tok, &en->st, 0);
+}
+
+
+// ( ptr sz fd -- num ior)
+void
+builtin_file_read(struct environ *en,
+                  struct token   tok) {
+    if(expect_stack(en, &en->st, tok, 3)) return;
+    int fd = (int)pop(en, tok, &en->st);
+    cell sz = (cell)pop(en, tok, &en->st);
+    char *ptr = (char*)pop(en, tok, &en->st);
+
+    ssize_t got = read(fd, ptr, sz);
+    push(en, tok, &en->st, (cell)got);
+
+    if (got >= 0)
+        push(en, tok, &en->st, 0);
+    else
+        push(en, tok, &en->st, THROW_IO_ERR);
+}
+
+// ( ptr sz fd -- num ior)
+void
+builtin_file_write(struct environ *en,
+                   struct token   tok) {
+    if(expect_stack(en, &en->st, tok, 3)) return;
+    int fd = (int)pop(en, tok, &en->st);
+    cell sz = (cell)pop(en, tok, &en->st);
+    char *ptr = (char*)pop(en, tok, &en->st);
+
+    ssize_t got = write(fd, ptr, sz);
+    push(en, tok, &en->st, (cell)got);
+
+    if (got >= 0)
+        push(en, tok, &en->st, 0);
+    else
+        push(en, tok, &en->st, THROW_IO_ERR);
 }
 
 void
@@ -1468,10 +1575,14 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "cr", 0, builtin_cr);
     dict = dict_append_builtin(&mem, dict, ".", 0, builtin_dot);
 
-    dict = dict_append_builtin(&mem, dict, "file-as-source", 0, builtin_file_as_source);
     dict = dict_append_builtin(&mem, dict, "file-open", 0, builtin_open_file);
-    //dict = dict_append_builtin(&mem, dict, "read-file", 0, builtin_refill);
+    dict = dict_append_builtin(&mem, dict, "file-create", 0, builtin_file_create);
     dict = dict_append_builtin(&mem, dict, "file-close", 0, builtin_close_file);
+    dict = dict_append_builtin(&mem, dict, "file-read", 0, builtin_file_read);
+    dict = dict_append_builtin(&mem, dict, "file-write", 0, builtin_file_write);
+    dict = dict_append_builtin(&mem, dict, "file-size", 0, builtin_file_size);
+    dict = dict_append_builtin(&mem, dict, "file-as-source", 0, builtin_file_as_source);
+    //dict = dict_append_builtin(&mem, dict, "read-file", 0, builtin_refill);
 
     dict = dict_append_builtin(&mem, dict, "catch", 0, builtin_catch);
     dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);

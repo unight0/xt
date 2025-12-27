@@ -94,4 +94,11 @@
 : w/o 1 ;
 : r/w 2 ;
 
+( filename -- )
 : include r/o file-open throw file-as-source throw ;
+
+\ Terminates buffer with a \0 character
+\ Equivalent to buf[len] = '\0';
+( buf len -- buf)
+: buf-terminate over swap + 0 swap b! ;
+
