@@ -39,16 +39,27 @@
 #define THROW_INTRONLY_WORD    -998
 #define THROW_OUT_OF_MEM       -999
 
+//TODO?: change our execution mode from Indirect-Threaded
+//Code to Subroutine-Threaded Code. (JIT compilation)
+//That means:
+//* Word bodies do not consist of dictionary entry pointers
+//  anymore.
+//* Word bodies are actual machine code
+//* Shouldn't be too hard -- it is mostly CALL instructions
+//* The environ structure things need to be global
+//* The main memory buffer needs to be executable (through mmap)
+//
+//+ We do not need NEXT, we just call the code region directly
+//+ No need to allocate a return stack, we'll use the system one
+//+ IP is not a variable, but a register
+//+ Performance (!)
+//
+//- Harder to compile
+//- We become architecture-dependent (although easy to port)
+
 typedef uint64_t cell;
 typedef uint8_t  byte;
 
-// TODO: move away from FILE* to fds
-// + Some things just translate directly
-// + Can actually check if fd is valid,
-//   invalid FILE* just point ot random
-//   memory, thus are unverifiable and 
-//   ultimately lead to segfaults
-// - Cannot use fputs for refilling
 struct input {
     char  source[SOURCE_SIZE];
     int   source_file;
@@ -363,9 +374,11 @@ NEXT(struct environ *en,
         // section is called. This cost me 2+ hours of debugging!
         ++en->ip;
 
-        (en->xt)->code(en, tok);
+        en->xt->code(en, tok);
 
         // Sometimes ip is advanced when we THROW
+        // I don't want to bother ensuring that it is
+        // always NULL
         if (en->ip < (cell*)(3 * 8)) break;
     }
 }
@@ -609,9 +622,9 @@ builtin_colon(struct environ *en,
 // Pushes the current IP, sets the IP to the body
 void
 docol(struct environ *en, struct token tok) {
-    //printf("DOCOL %s\n", (en->xt)->name);
+    //printf("DOCOL %s\n", en->xt->name);
     push(en, tok, &en->rst, (cell) en->ip);
-    en->ip = (cell*) (en->xt)->body;
+    en->ip = (cell*) en->xt->body;
 }
 
 void
@@ -713,7 +726,7 @@ builtin_execute(struct environ *en,
     if (expect_stack(en, &en->st, tok, 1)) return;
     en->xt = (struct entry*)pop(en, tok, &en->st);
 
-    (en->xt)->code(en, tok);
+    en->xt->code(en, tok);
 }
 
 void
@@ -721,7 +734,6 @@ builtin_branch(struct environ *en,
                struct token   tok) {
     (void)tok;
     cell off = *en->ip;
-    //en->ip += off;
     en->ip = (cell*) off;
 }
 
@@ -738,7 +750,6 @@ builtin_0branch(struct environ *en,
         return;
     }
 
-    //en->ip += off;
     en->ip = (cell*) off;
 }
 
@@ -890,14 +901,6 @@ builtin_dict_body(struct environ *en,
     struct entry *e = (struct entry*) pop(en, tok, &en->st);
     push(en, tok, &en->st, (cell) e->body);
 }
-
-//void
-//builtin_dict_bdsz(struct environ *en,
-//                  struct token   tok) {
-//    if (expect_stack(en, &en->st, tok, 1)) return;
-//    struct entry *e = (struct entry*) pop(en, tok, &en->st);
-//    push(en, tok, &en->st, (cell) e->body_sz);
-//}
 
 void
 builtin_drop(struct environ *en,
@@ -1445,12 +1448,6 @@ eval(struct environ *en) {
 
 int
 refill(struct input *st) {
-    //if (eof(st->source_file)) return THROW_EOF;
-
-    //if (fgets(st->source, SOURCE_SIZE, st->source_file) == NULL)
-    //    return THROW_EOF;
-
-    //printf("Refilling from %d\n", st->source_file);
     size_t i = 0;
 
     for (; i < SOURCE_SIZE - 1; i++) {
@@ -1658,9 +1655,8 @@ main(int argc, char **argv) {
         // End of all sources
         if (in == NULL) break;
 
-        if (in->source_file == STDIN_FILENO) {
+        if (in->source_file == STDIN_FILENO)
             write(STDOUT_FILENO, "> ", 2);
-        }
 
         while (!refill(inputs_top(en.inps))) {
             eval(&en);
@@ -1669,19 +1665,24 @@ main(int argc, char **argv) {
 
             if (en.terminate) {
                 en.terminate = 0;
+                if (en.mode == MODE_COMPILE) {
+                    // Exit compilation mode
+                    en.mode = MODE_INTERPRET;
+                    // Reset memory to pre-compilation state
+                    // TODO: is this safe?
+                    en.mem.mem = en.newword;
+                }
                 if (in->source_file != STDIN_FILENO) break;
-                else continue;
+                continue;
             }
-            if (in->source_file == STDIN_FILENO) {
+            if (in->source_file == STDIN_FILENO)
                 write(STDOUT_FILENO, "> ", 2);
-            }
         }
 
         en.inps = inputs_pop(en.inps);
     }
 
     free(en.inps);
-
     free(mem.mem);
     free(pad);
 }
