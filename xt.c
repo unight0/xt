@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <stdint.h>
-#include <signal.h>
+//#include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -34,6 +34,13 @@
 #define THROW_COMPONLY_WORD    -14
 #define THROW_IO_ERR           -37
 #define THROW_EOF              -39
+#define THROW_MEM_POP_FAIL     -991
+#define THROW_MEM_INSTALL_FAIL -992
+#define THROW_MALLOC_FAIL      -993
+#define THROW_REALLOC_FAIL     -994
+// This is a placeholder, free()
+// cannot fail safely
+#define THROW_FREE_FAIL        -995
 #define THROW_FILE_NONEXISTENT -996
 #define THROW_INVALID_ARGUMENT -997
 #define THROW_INTRONLY_WORD    -998
@@ -107,7 +114,9 @@ struct entry {
 // + Less passing around of stuff
 // - Cannot run several interpreter instances within
 //   single program state
-//   (Do we actually need that?)
+//   (Do we actually need that? Anyway multithreading
+//   is going to be a pain to implement, equally if
+//   we have several program states or just a single one)
 struct environ {
     struct inputs *inps;
     struct input  *inpt;
@@ -126,7 +135,7 @@ struct environ {
     cell          *catch;
     char          *catch_st;
     char          *catch_rst;
-    char           terminate;
+    char /*bool*/  terminate;
 };
 
 void throw(struct environ*, struct token, cell);
@@ -378,6 +387,7 @@ NEXT(struct environ *en,
         // Sometimes ip is advanced when we THROW
         // I don't want to bother ensuring that it is
         // always NULL
+        // This assumes NULL == 0
         if (en->ip < (cell*)(3 * 8)) break;
     }
 }
@@ -836,6 +846,103 @@ builtin_bput(struct environ *en,
     *addr = val;
 }
 
+// Allocate heap memory block
+void
+builtin_allocate(struct environ *en,
+                 struct token   tok) {
+    if (expect_stack(en, &en->st, tok, 1)) return;
+    cell amount = pop(en, tok, &en->st);
+    void *p = malloc(amount);
+
+    push(en, tok, &en->st, (cell) p);
+
+    push(en, tok, &en->st,
+            p == NULL ? THROW_MALLOC_FAIL : 0);
+}
+
+// Resize heap memory block
+void
+builtin_resize(struct environ *en,
+               struct token   tok) {
+    if (expect_stack(en, &en->st, tok, 2)) return;
+    cell size = pop(en, tok, &en->st);
+    void *p = (void*) pop(en, tok, &en->st);
+
+    p = realloc(p, size);
+
+    push(en, tok, &en->st, (cell) p);
+
+    push(en, tok, &en->st,
+            p == NULL ? THROW_REALLOC_FAIL : 0);
+}
+
+// Free heap block
+void
+builtin_free(struct environ *en,
+             struct token   tok) {
+    if (expect_stack(en, &en->st, tok, 1)) return;
+    void *p = (void*) pop(en, tok, &en->st);
+
+    free(p);
+
+    // This is a placeholder
+    // Standard free() does not allow safe recovery
+    // We may need to implement some sort of wrappers
+    push(en, tok, &en->st, 0);
+}
+
+// Install (any sort of) a memory block as a new memory
+void
+builtin_mem_install(struct environ *en,
+                    struct token   tok) {
+    if (expect_stack(en, &en->st, tok, 2)) return;
+    cell size = pop(en, tok, &en->st);
+    char *p = (char*) pop(en, tok, &en->st);
+
+    // Too small
+    if (size < sizeof(struct memory)) {
+        push(en, tok, &en->st, THROW_MEM_INSTALL_FAIL);
+        return;
+    }
+
+    // Add metadata about the previous memory
+    *(struct memory*)p = en->mem;
+
+    en->mem.mem = p;
+    en->mem.cur = p + sizeof(struct memory);
+    en->mem.sz = size;
+
+    push(en, tok, &en->st, 0);
+}
+
+// Pop the topmost installed memory block
+void
+builtin_mem_pop(struct environ *en,
+                struct token   tok) {
+    struct memory metadata = *(struct memory*)en->mem.mem;
+    if (metadata.sz == 0) {
+        push(en, tok, &en->st, THROW_MEM_POP_FAIL);
+        return;
+    }
+
+    struct entry *dict = en->dict;
+    // While dictionary entries are within the currently installed memory segment
+    while (((char *)dict > en->mem.mem)
+         &&((char *)dict < (en->mem.mem + en->mem.sz))) {
+        if (dict == NULL) {
+            error(tok, "INTERNAL CRITICAL ERROR: No dictionary entry within new bounds were found!");
+            exit(1);
+        }
+        dict = dict->next;
+    }
+
+    en->dict = dict;
+
+    en->mem = metadata;
+
+    push(en, tok, &en->st, 0);
+}
+
 void
 builtin_pad(struct environ *en,
             struct token   tok) {
@@ -1141,7 +1248,7 @@ mode_by_method(int m) {
         case 2:
             return O_RDWR | O_APPEND | O_CREAT;
     }
-    return 0;
+    return -1;
 }
 
 void
@@ -1152,7 +1259,7 @@ builtin_open_file(struct environ *en,
     char *filename = (char*)pop(en, tok, &en->st);
     int mode = mode_by_method(method);
     
-    if (mode == 0) {
+    if (mode == -1) {
         push(en, tok, &en->st, (cell)-1);
         push(en, tok, &en->st, THROW_INVALID_ARGUMENT);
         return;
@@ -1394,18 +1501,6 @@ builtin_does(struct environ *en,
     *(cell*) en->mem.cur = (cell) en->ip;
     en->mem.cur += sizeof(cell);
 
-    //struct entry *entry = (struct entry*) en->mem.cur;
-
-    //*entry = (struct entry) {
-    //    NULL,
-    //    "",
-    //    0,
-    //    pushjump,
-    //    helperbody
-    //};
-
-    //en->mem.cur += sizeof(struct entry);
-
     // Modify the CREATEd word
     word->code = pushjump;
     word->body = helperbody;
@@ -1544,13 +1639,13 @@ refill(struct input *st) {
     for (; i < SOURCE_SIZE - 1; i++) {
         char c;
         int got = read(st->source_file, &c, 1);
+        // End of file reached
         if (got == 0) {
-            //printf("Throw EOF!\n");
             close(st->source_file);
             return THROW_EOF;
         }
+        // Some I/O error happened
         if (got < 0) {
-            //printf("Throw IO ERROR!\n");
             close(st->source_file);
             return THROW_IO_ERR;
         }
@@ -1592,9 +1687,15 @@ main(int argc, char **argv) {
     }
 
     char *mem_buf = malloc(MEMORY_SIZE);
+
+    // Add metadata about the previous memory (non-existent)
+    *(struct memory*)mem_buf = (struct memory) {
+        NULL, NULL, 0
+    };
+
     struct memory mem = {
         mem_buf,
-        mem_buf,
+        mem_buf + sizeof(struct memory),
         MEMORY_SIZE
     };
 
@@ -1630,6 +1731,12 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "!", 0, builtin_put);
     dict = dict_append_builtin(&mem, dict, "b@", 0, builtin_bat);
     dict = dict_append_builtin(&mem, dict, "b!", 0, builtin_bput);
+
+    dict = dict_append_builtin(&mem, dict, "heap-allocate", 0, builtin_allocate);
+    dict = dict_append_builtin(&mem, dict, "heap-resize", 0, builtin_resize);
+    dict = dict_append_builtin(&mem, dict, "heap-free", 0, builtin_free);
+    dict = dict_append_builtin(&mem, dict, "mem-install", 0, builtin_mem_install);
+    dict = dict_append_builtin(&mem, dict, "mem-pop", 0, builtin_mem_pop);
 
     dict = dict_append_builtin(&mem, dict, "pad", 0, builtin_pad);
     dict = dict_append_builtin(&mem, dict, "'", 0, builtin_dict_search);
@@ -1680,7 +1787,6 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "file-write", 0, builtin_file_write);
     dict = dict_append_builtin(&mem, dict, "file-size", 0, builtin_file_size);
     dict = dict_append_builtin(&mem, dict, "file-as-source", 0, builtin_file_as_source);
-    //dict = dict_append_builtin(&mem, dict, "read-file", 0, builtin_refill);
 
     dict = dict_append_builtin(&mem, dict, "catch", 0, builtin_catch);
     dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);
@@ -1693,27 +1799,6 @@ main(int argc, char **argv) {
 
     dict = dict_append_builtin(&mem, dict, "quit", 0, builtin_quit);
 
-//struct environ {
-//    struct inputs *inps;
-//    struct input  *inpt;
-//    struct memory  mem;
-//    struct stack   st;
-//    struct stack   rst;
-//    struct entry  *dict;
-//    char           mode;
-//    char          *pad;
-//    /* Used for compilation mode */
-//    char          *newword_name;
-//    char          *newword;
-//    //size_t        *newword_sz;
-//    /* Inner interpreter */
-//    cell          *ip;
-//    struct entry  *xt; 
-//    cell          *catch;
-//    char          *catch_st;
-//    char          *catch_rst;
-//    char           terminate;
-//};
     struct environ en = {
          NULL,
          NULL,
@@ -1775,7 +1860,6 @@ main(int argc, char **argv) {
                     // Exit compilation mode
                     en.mode = MODE_INTERPRET;
                     // Reset memory to pre-compilation state
-                    // TODO: is this safe?
                     en.mem.mem = en.newword;
                 }
                 if (in->source_file != STDIN_FILENO) break;

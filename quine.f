@@ -5,9 +5,8 @@
 \ -----------------------------------------
 
 $" quine.f" r/o file-open throw
-            $" Length: " type 
-            dup file-size throw . cr
-            dup pad 800 rot file-read throw drop
-            pad dup strlen buf-terminate type
+            ." Length: " dup file-size throw . cr
+            dup pad 800 rot file-read throw 
+            pad swap buf-terminate type
             file-close throw
             quit
