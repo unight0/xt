@@ -10,3 +10,4 @@ $" quine.f" r/o file-open throw
             dup pad 800 rot file-read throw drop
             pad dup strlen buf-terminate type
             file-close throw
+            quit

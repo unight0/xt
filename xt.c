@@ -236,7 +236,6 @@ dict_append_builtin(struct memory *mem, struct entry *dict, char *name, byte fla
 
     mem->cur += sizeof(struct entry);
 
-
     return entry;
 }
 
@@ -1131,13 +1130,16 @@ int
 mode_by_method(int m) {
     //printf("Method: %d\n", m);
     switch(m) {
+        // r/o
         case 0:
-            return O_RDONLY | O_CREAT;
+            return O_RDONLY;
+        // w/o
         case 1:
             // Don't truncate files
             return O_WRONLY | O_APPEND | O_CREAT;
+        // r/w
         case 2:
-            return O_RDWR | O_CREAT;
+            return O_RDWR | O_APPEND | O_CREAT;
     }
     return 0;
 }
@@ -1328,6 +1330,91 @@ builtin_throw(struct environ *en,
     throw(en, tok, val);
 }
 
+// Helper code word
+// Push the value stored in the body pointer
+void
+crpush(struct environ *en, struct token tok) {
+    push(en, tok, &en->st, (cell) en->xt->body);
+}
+
+void
+builtin_create(struct environ *en,
+               struct token   tok) {
+    struct token name = next(en->inpt);
+
+    if (name.val == NULL) {
+        error(tok, "No name provided");
+        return;
+    }
+
+    en->newword_name = en->mem.cur;
+    strcpy(en->mem.cur, name.val);
+    en->mem.cur += strlen(name.val) + 1;
+
+    en->dict = dict_append(&en->mem,
+                           en->dict,
+                           en->newword_name,
+                           0,
+                           NULL,
+                           crpush);
+
+    // Set the data field pointer
+    en->dict->body = en->mem.cur;
+}
+
+// Helper code word for does>
+// Push the first cell of the body
+// Set IP to the value of the second cell of the body
+void
+pushjump(struct environ *en, struct token tok) {
+    //printf("PUSHJUMP: %ld, %p\n",
+    //        (cell) *(cell*) en->xt->body,
+    //        (cell*) *(((cell*) en->xt->body) + 1));
+    push(en, tok, &en->st, *(cell*) en->xt->body);
+
+    push(en, tok, &en->rst, (cell) en->ip);
+    en->ip = (cell*) *(((cell*) en->xt->body) + 1);
+}
+
+void
+builtin_does(struct environ *en,
+             struct token   tok) {
+
+    struct entry *word = en->dict;
+
+    // Compile helper word
+    // Helper word:
+    // Push data pointer
+    // Execute the code that follows does>
+    char *helperbody = (char*) en->mem.cur;
+    // Push
+    *(cell*) en->mem.cur = (cell) word->body;
+    en->mem.cur += sizeof(cell);
+    // Jump
+    *(cell*) en->mem.cur = (cell) en->ip;
+    en->mem.cur += sizeof(cell);
+
+    //struct entry *entry = (struct entry*) en->mem.cur;
+
+    //*entry = (struct entry) {
+    //    NULL,
+    //    "",
+    //    0,
+    //    pushjump,
+    //    helperbody
+    //};
+
+    //en->mem.cur += sizeof(struct entry);
+
+    // Modify the CREATEd word
+    word->code = pushjump;
+    word->body = helperbody;
+
+    // Return
+    cell new_ip = pop(en, tok, &en->rst);
+    en->ip = (cell*) new_ip;
+}
+
 void
 builtin_stackdump(struct environ *en,
                   struct token   tok) {
@@ -1356,7 +1443,7 @@ builtin_worddump(struct environ *en,
     struct token tk = next(en->inpt);
     if (tk.val == NULL || !strlen(tk.val)) {
         error(tok, "No argument provided for worddump!");
-        raise(SIGINT);
+        //raise(SIGINT);
         exit(1);
     }
 
@@ -1364,11 +1451,15 @@ builtin_worddump(struct environ *en,
 
     if (e == NULL) {
         error(tok, "Word doesn't exist");
-        raise(SIGINT);
+        //raise(SIGINT);
         exit(1);
     }
 
-    printf("Worddump for %s\n", e->name);
+    printf("Worddump for '%s'\n", e->name);
+    if (e->code != docol) {
+        printf("<assembly>\n");
+        return;
+    }
     for (struct entry **w = (struct entry**) e->body;
          (*w)->code != builtin_ret; w++) {
 
@@ -1482,6 +1573,16 @@ builtin_refill(struct environ *en,
     push(en, tok, &en->st, refill(en->inpt));
 }
 
+void
+builtin_quit(struct environ *en,
+             struct token    tok) {
+    (void)tok;
+    free(en->inps);
+    free(en->mem.mem);
+    free(en->pad);
+    exit(0);
+}
+
 int
 main(int argc, char **argv) {
     if (argc < 2) {
@@ -1584,8 +1685,13 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "catch", 0, builtin_catch);
     dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);
 
+    dict = dict_append_builtin(&mem, dict, "create", 0, builtin_create);
+    dict = dict_append_builtin(&mem, dict, "does>", DICT_FLAG_COMPONLY, builtin_does);
+
     dict = dict_append_builtin(&mem, dict, "stackdump", 0, builtin_stackdump);
     dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);
+
+    dict = dict_append_builtin(&mem, dict, "quit", 0, builtin_quit);
 
 //struct environ {
 //    struct inputs *inps;

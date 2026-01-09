@@ -86,14 +86,18 @@
 ; immediate compile-only
 : mem-report mem-used . '/' b>t mem-total . s"  bytes used" type cr ;
 \ Works similar to s", but for interpretation mode
-( $ <str>" -- str-ptr)
+( $" <str>" -- str-ptr)
 : $" '"' parse here strcpy dup strlen 1 + allot ; interpret-only
+\ .( <str>) --
 : .( ')' parse type ; immediate
 
+\ Modes of file access
 : r/o 0 ;
 : w/o 1 ;
 : r/w 2 ;
 
+\ Evaluate the contents of the specified file
+\ Example usage: $" test.f" include
 ( filename -- )
 : include r/o file-open throw file-as-source throw ;
 
@@ -102,3 +106,34 @@
 ( buf len -- buf)
 : buf-terminate over swap + 0 swap b! ;
 
+\ Write a string into a file
+( str fd -- num ior )
+: file-writestr swap dup strlen rot file-write ;
+
+\ Write a character into a file
+( ch fd -- ior )
+: file-putchar swap here b! here 1 rot file-write swap drop ;
+
+\ Write a string to file, then append newline to file
+( str fd -- )
+: file-writeln 
+    dup rot swap
+    file-writestr dup 0 < if ret then
+    drop 10 swap
+    file-putchar
+;
+
+\ Creates a constant, which is a word that pushes
+\ the specified value to stack upon being executed
+( value constant <spaces>name -- )
+: constant create , does> @ ;
+
+\ Creates a variable, which is a word that pushes
+\ the address of one cell to stack upon being executed
+\ That cell is initialized with the specified value
+( value variable <spaces>name -- )
+: variable create , ;
+
+\ $" test" r/w file-open throw
+\          dup $" Hello!" swap file-writeln
+\          file-close quit

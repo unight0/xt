@@ -1,8 +1,8 @@
 
 CC = gcc
 LD = gcc
-CFLAGS = -Wall -Wextra -g #-fsanitize=address
-LDFLAGS = #-fsanitize=address
+CFLAGS = -Wall -Wextra -g -fsanitize=address
+LDFLAGS = -fsanitize=address
 TARGET = xt
 
 SRCS = $(wildcard *.c)
