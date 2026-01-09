@@ -2,49 +2,13 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
-#include <ctype.h>
-#include <stdint.h>
-//#include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#define DICT_FLAG_IMMED    1
-#define DICT_FLAG_COMPONLY 1 << 1
-#define DICT_FLAG_INTRONLY 1 << 2
-#define MEMORY_SIZE        32*1024
-#define STACK_SIZE         256
-#define RSTACK_SIZE        512
 #define PAD_SIZE           1024
-#define SOURCE_SIZE        1024
 #define MODE_INTERPRET     0
 #define MODE_COMPILE       1
-#define ID_WORD            0
-#define ID_INT             1
-#define ID_HEX             2
-#define ID_BIN             3
-#define ID_FLT             4
-#define ID_CHAR            5
-
-#define THROW_STACK_OVERFLOW   -3
-#define THROW_STACK_UNDERFLOW  -4
-//#define THROW_RSTACK_OVERFLOW  -5
-//#define THROW_RSTACK_UNDERFLOW -6
-#define THROW_UNDEFINED_WORD   -13
-#define THROW_COMPONLY_WORD    -14
-#define THROW_IO_ERR           -37
-#define THROW_EOF              -39
-#define THROW_MEM_POP_FAIL     -991
-#define THROW_MEM_INSTALL_FAIL -992
-#define THROW_MALLOC_FAIL      -993
-#define THROW_REALLOC_FAIL     -994
-// This is a placeholder, free()
-// cannot fail safely
-#define THROW_FREE_FAIL        -995
-#define THROW_FILE_NONEXISTENT -996
-#define THROW_INVALID_ARGUMENT -997
-#define THROW_INTRONLY_WORD    -998
-#define THROW_OUT_OF_MEM       -999
 
 //TODO?: change our execution mode from Indirect-Threaded
 //Code to Subroutine-Threaded Code. (JIT compilation)
@@ -53,401 +17,149 @@
 //  anymore.
 //* Word bodies are actual machine code
 //* Shouldn't be too hard -- it is mostly CALL instructions
-//* The environ structure things need to be global
 //* The main memory buffer needs to be executable (through mmap)
 //
 //+ We do not need NEXT, we just call the code region directly
 //+ No need to allocate a return stack, we'll use the system one
-//+ IP is not a variable, but a register
 //+ Performance (!)
 //
 //- Harder to compile
 //- We become architecture-dependent (although easy to port)
 
-typedef uint64_t cell;
-typedef uint8_t  byte;
+#include "defs.h"
+#include "input.h"
+#include "stack.h"
+#include "token.h"
+#include "memory.h"
+#include "dict.h"
+#include "lexer.h"
 
-struct input {
-    char  source[SOURCE_SIZE];
-    int   source_file;
-    int   line;
-    int   col;
-    char *cur;
-};
+// Many global variables. This is the best approach in this scenario. Otherwise
+// we would have to pack all of this info into one big struct that would be
+// constantly passed around functions. This creates not only a lot of visual
+// noise, but also decreases performance. Moreover, global variables also map
+// more directly to the purpose of the program: it is an interpreter, and these
+// variables are exactly the entirety of its state. It makes no sense to have
+// several interpretation instances within one XT instance.
+/* General */
+static struct inputs    *inps;
+static struct input     *inpt;
+static struct memory     mem;
+static struct stack      st;
+static struct stack      rst;
+static struct entry     *dict;
+static byte              mode;
+static byte             *pad;
 
-struct inputs {
-    size_t num;
-    struct input inps[];
-};
+/* Used for compilation mode */
+static char             *newword_name;
+static byte             *newword;
 
-struct token {
-    int   line;
-    int   col;
-    char *val;
-};
+/* Inner interpreter */
+static cell             *ip;
+static struct entry     *xt; 
+static cell             *catch;
+static byte             *catch_st;
+static byte             *catch_rst;
+static byte              terminate;
 
-struct memory {
-    char  *mem;
-    char  *cur;
-    size_t sz;
-};
-
-// Note that stack grows downwards
-struct stack {
-    char *begin;
-    char *cur;
-    char *end;
-};
-
-struct environ;
-typedef void (builtin (struct environ *en, struct token));
-
-struct entry {
-    struct entry *next;
-    char         *name;
-    byte          flags;
-    builtin      *code;
-    char         *body;
-};
-
-// We can probably make this structure global.
-// + Less passing around of stuff
-// - Cannot run several interpreter instances within
-//   single program state
-//   (Do we actually need that? Anyway multithreading
-//   is going to be a pain to implement, equally if
-//   we have several program states or just a single one)
-struct environ {
-    struct inputs *inps;
-    struct input  *inpt;
-    struct memory  mem;
-    struct stack   st;
-    struct stack   rst;
-    struct entry  *dict;
-    char           mode;
-    char          *pad;
-    /* Used for compilation mode */
-    char          *newword_name;
-    char          *newword;
-    /* Inner interpreter */
-    cell          *ip;
-    struct entry  *xt; 
-    cell          *catch;
-    char          *catch_st;
-    char          *catch_rst;
-    char /*bool*/  terminate;
-};
-
-void throw(struct environ*, struct token, cell);
-
-struct inputs *
-inputs_append(struct inputs *inps, struct input inp) {
-    inps->num++;
-    inps = realloc(inps,
-                sizeof(struct inputs) +
-                //sizeof(size_t) +
-                sizeof(struct input) * inps->num);
-    inps->inps[inps->num - 1] = inp;
-    return inps;
-}
-
-struct inputs *
-inputs_pop(struct inputs *inps) {
-    inps->num--;
-    inps = realloc(inps,
-            sizeof(struct inputs) + 
-            //sizeof(size_t) +
-            sizeof(struct input) * inps->num);
-    return inps;
-}
-
-struct input *
-inputs_top(struct inputs *inps) {
-    if (inps->num == 0) return NULL;
-    return &inps->inps[inps->num - 1];
-}
-
-void
-advance(struct input *st) {
-    //assert(*st->cur && "Cannot advance past the end of string");
-    st->col++;
-    if (*st->cur == '\n') {
-        st->col = 0;
-        st->line++;
-    }
-    st->cur++;
-}
-
-struct token
-next(struct input *st) {
-    if (!*st->cur) return (struct token) {0, 0, NULL};
-
-    while (isspace(*st->cur) && *st->cur) {
-        advance(st);
-    }
-    char *val = st->cur;
-    const int line = st->line;
-    const int col = st->col;
-
-    while (!isspace(*st->cur) && *st->cur) {
-        advance(st);
-    }
-
-    char *end = st->cur;
-
-    if (*end) {
-        advance(st);
-        *end = 0;
-    }
-
-    if (!strlen(val)) return (struct token) {line, col, NULL};
-
-    return (struct token) {line, col, val};
-}
-
-
-struct stack
-new_stack(struct memory *mem, size_t size) {
-    struct stack st = (struct stack) {
-        mem->cur + size,
-        mem->cur + size,
-        mem->cur,
-    };
-
-    mem->cur += size;
-
-    return st;
-}
-
-struct entry *
-dict_search(struct entry *dict, const char *word) {
-    for (size_t i = 0; i < 1000000; i++) {
-        if (dict == NULL) return NULL;
-        if (!strcmp(dict->name, word))
-            return dict;
-        dict = dict->next;
-    }
-    printf("CRITICAL ERROR: Either dictionary is looped, or it has over 1_000_000 entries\n");
-    exit(1);
-}
-
-struct entry *
-dict_append_builtin(struct memory *mem, struct entry *dict, char *name, byte flags, builtin b) {
-    struct entry *entry = (struct entry*) mem->cur;
-
-    *entry = (struct entry) {
-        dict,
-        name,
-        flags,
-        b,
-        NULL
-    };
-
-    mem->cur += sizeof(struct entry);
-
-    return entry;
-}
-
-struct entry *
-dict_append(struct memory *mem, struct entry *dict, char *name, byte flags, char *body, builtin b) {
-    struct entry *entry = (struct entry*) mem->cur;
-
-    *entry = (struct entry) {
-        dict,
-        name,
-        flags,
-        b,
-        body
-    };
-
-    mem->cur += sizeof(struct entry);
-
-    return entry;
-}
+void throw(struct token, cell);
 
 void
 error(struct token t, const char *msg) {
     printf("Error at (%d:%d '%s'): %s\n", t.line + 1, t.col + 1, t.val, msg);
 }
 
-void
-push(struct environ *en,
-     struct token   t,
-     struct stack  *st,
-     cell           c) {
-    if (st->cur - sizeof(cell) <= st->end) {
-        error(t, "Stack overflow!");
-        throw(en, t, THROW_STACK_OVERFLOW);
-        return;
-    }
-    st->cur -= sizeof(cell);
-    *(cell*) st->cur = c;
-}
-
-cell
-top(struct environ *en,
-    struct token   t,
-    struct stack  *st) {
-    if (st->cur == st->begin) {
-        error(t, "Stack underflow!");
-        throw(en, t, THROW_STACK_UNDERFLOW);
-        return 0;
-    }
-    cell c = *(cell*) st->cur;
-    return c;
-}
-
-cell
-pop(struct environ *en,
-    struct token   t,
-    struct stack  *st) {
-    if (st->cur == st->begin) {
-        error(t, "Stack underflow!");
-        throw(en, t, THROW_STACK_UNDERFLOW);
-        return 0;
-    }
-    cell c = *(cell*) st->cur;
-    st->cur += sizeof(cell);
-    return c;
-}
 int
-identify(char *tok) {
-    assert(strlen(tok) && "Empty token");
-
-    // 'c'
-    if (strlen(tok) == 3) {
-        if (tok[0] == '\'' && tok[2] == '\'') {
-            return ID_CHAR;
-        }
-    }
-
-    // 0xDEADBEEF
-    if (*tok == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
-        tok += 2;
-        for (; isxdigit(*tok); tok++);
-        if (!*tok) return ID_HEX;
-        return ID_WORD;
-    }
-
-    // 0b1111101111101
-    if (*tok == '0' && (tok[1] == 'b' || tok[1] == 'B')) {
-        tok += 2;
-        for (; isxdigit(*tok); tok++);
-        if (!*tok) return ID_HEX;
-        return ID_WORD;
-    }
-
-    if ((*tok == '-') && strlen(tok) > 1)
-        tok++;
-
-    if (!isdigit(*tok)) return ID_WORD;
-
-    int dots = 0;
-
-    for (; isdigit(*tok) || *tok == '.'; tok++) {
-        if (*tok == '.') dots++;
-    }
-    if (*tok) return ID_WORD;
-
-    if (dots > 1) return ID_WORD;
-    if (dots == 1) return ID_FLT;
-    return ID_INT;
-}
-
-int
-check_mem(struct environ *en, struct token tok) {
-    if (en->mem.cur > en->mem.mem + en->mem.sz) {
+check_mem(struct token tok) {
+    if (mem.cur > mem.mem + mem.sz) {
         error(tok, "Out of memory!");
-        en->mem.cur = en->mem.mem + en->mem.sz;
-        throw(en, tok, THROW_OUT_OF_MEM);
+        mem.cur = mem.mem + mem.sz;
+        throw(tok, THROW_OUT_OF_MEM);
         return 1;
     }
     return 0;
 }
 
 void
-NEXT(struct environ *en,
-     struct token   tok) {
-    while (en->ip != NULL) {
-        en->xt = (struct entry*)*en->ip;
+NEXT(struct token tok) {
+    while (ip != NULL) {
+        xt = (struct entry*)*ip;
 
-        //printf("NEXT(): %s\n", (en->xt)->name);
+        //printf("NEXT(): %s\n", (xt)->name);
 
-        if ((en->xt)->flags & DICT_FLAG_INTRONLY) {
+        if ((xt)->flags & DICT_FLAG_INTRONLY) {
             error(tok, "INTERNAL CRITICAL ERROR: Encountered an interpret-only word during NEXT()");
             exit(1);
         }
 
         // It is ESSENTIAL that IP is incremented BEFORE code
         // section is called. This cost me 2+ hours of debugging!
-        ++en->ip;
+        ++ip;
 
-        en->xt->code(en, tok);
+        xt->code(tok);
 
         // Sometimes ip is advanced when we THROW
         // I don't want to bother ensuring that it is
         // always NULL
         // This assumes NULL == 0
-        if (en->ip < (cell*)(3 * 8)) break;
+        if (ip < (cell*)(3 * sizeof(cell))) break;
     }
 }
 
 // Entry into inner interpreter
 void
-execute_word(struct environ *en,
-             struct token   tok,
+execute_word(struct token tok,
              struct entry  *e) {
 
-    en->xt = e;
-    e->code(en, tok);
-    NEXT(en, tok);
+    xt = e;
+    e->code(tok);
+    NEXT(tok);
 
     // Catches set within the return stack cannot be returned to
-    en->catch = NULL;
-    en->catch_st = en->st.cur;
-    en->catch_rst = en->rst.cur;
+    catch = NULL;
+    catch_st = st.cur;
+    catch_rst = rst.cur;
 }
 
 void
-execute_word_tok(struct environ *en,
-                 struct token tok) {
-    struct entry *def = dict_search(en->dict, tok.val);
+execute_word_tok(struct token tok) {
+    struct entry *def = dict_search(dict, tok.val);
     if (def == NULL) {
         error(tok, "Unknown word");
-        throw(en, tok, THROW_UNDEFINED_WORD);
+        throw(tok, THROW_UNDEFINED_WORD);
         return;
     }
     if (def->flags & DICT_FLAG_COMPONLY) {
         error(tok, "Word is compile-only");
-        throw(en, tok, THROW_COMPONLY_WORD);
+        throw(tok, THROW_COMPONLY_WORD);
         return;
     }
-    execute_word(en, tok, def);
+    execute_word(tok, def);
 }
 void
-execute_token(struct environ *en,
-              struct token tok) {
+execute_token(struct token tok) {
 
     int id = identify(tok.val);
 
     switch (id) {
         case ID_INT:
-            push(en, tok, &en->st, strtoll(tok.val, NULL, 10));
+            push(tok, &st, strtoll(tok.val, NULL, 10));
             break;
         case ID_HEX:
-            push(en, tok, &en->st, strtoll(tok.val, NULL, 16));
+            push(tok, &st, strtoll(tok.val, NULL, 16));
             break;
         case ID_BIN:
-            push(en, tok, &en->st, strtoll(tok.val, NULL, 2));
+            push(tok, &st, strtoll(tok.val, NULL, 2));
             break;
         case ID_CHAR:
-            push(en, tok, &en->st, (cell) tok.val[1]);
+            push(tok, &st, (cell) tok.val[1]);
             break;
         case ID_FLT:
             printf("Floats are not implemented yet\n");
             exit(1);
         case ID_WORD:
-            execute_word_tok(en, tok);
+            execute_word_tok(tok);
             break;
         default:
             printf("Token id: %d\n", id);
@@ -456,36 +168,33 @@ execute_token(struct environ *en,
 }
 
 void
-compile_word(struct environ *en,
-             struct token   tok) {
-    struct entry *e = dict_search(en->dict, tok.val);
+compile_word(struct token tok) {
+    struct entry *e = dict_search(dict, tok.val);
     if (e == NULL) {
         error(tok, "Unknown word");
-        throw(en, tok, THROW_UNDEFINED_WORD);
+        throw(tok, THROW_UNDEFINED_WORD);
         return;
     }
     //printf("CW: %s\n", e->name);
     if (e->flags & DICT_FLAG_IMMED) {
         //printf("IMMED %s\n", e->name);
-        execute_word(en, tok, e);
+        execute_word(tok, e);
         return;
     }
     if (e->flags & DICT_FLAG_INTRONLY) {
         error(tok, "Word is interpret-only");
-        throw(en, tok, THROW_INTRONLY_WORD);
+        throw(tok, THROW_INTRONLY_WORD);
         return;
     }
-    *(cell*) en->mem.cur = (cell) e;
-    en->mem.cur += sizeof(cell);
-    //++en->newword_sz;
+    *(cell*) mem.cur = (cell) e;
+    mem.cur += sizeof(cell);
 }
 
 void
-compile_push(struct token   tok,
-             struct environ *en,
+compile_push(struct token tok,
              cell           val) {
 
-    struct entry *w_lit = dict_search(en->dict, "lit");
+    struct entry *w_lit = dict_search(dict, "lit");
     
     if (w_lit == NULL) {
         error(tok, "CRITICAL ERROR: no lit word defined! Unable to compile push");
@@ -494,48 +203,45 @@ compile_push(struct token   tok,
     
     //printf("CPSH: %ld\n", val);
 
-    *(cell*) en->mem.cur = (cell) w_lit;
-    en->mem.cur += sizeof(cell);
+    *(cell*) mem.cur = (cell) w_lit;
+    mem.cur += sizeof(cell);
 
-    *(cell*) en->mem.cur = val;
-    en->mem.cur += sizeof(cell);
-
-    //en->newword_sz += 2;
+    *(cell*) mem.cur = val;
+    mem.cur += sizeof(cell);
 }
 void
-abort_compile(struct environ *en) {
-    en->mode = MODE_INTERPRET;
-    en->mem.cur = en->newword;
-    printf("Compilation of word %s aborted\n", en->newword_name);
+abort_compile() {
+    mode = MODE_INTERPRET;
+    mem.cur = newword;
+    printf("Compilation of word %s aborted\n", newword_name);
 }
 void
-compile_token(struct environ *en,
-              struct token   tok) {
+compile_token(struct token tok) {
     int id = identify(tok.val);
 
-    if (check_mem(en, tok)) {
-        abort_compile(en);
+    if (check_mem(tok)) {
+        abort_compile();
         return;
     }
 
     switch (id) {
         case ID_INT:
-            compile_push(tok, en, strtoll(tok.val, NULL, 10));
+            compile_push(tok, strtoll(tok.val, NULL, 10));
             break;
         case ID_HEX:
-            compile_push(tok, en, strtoll(tok.val, NULL, 16));
+            compile_push(tok, strtoll(tok.val, NULL, 16));
             break;
         case ID_BIN:
-            compile_push(tok, en, strtoll(tok.val, NULL, 2));
+            compile_push(tok, strtoll(tok.val, NULL, 2));
             break;
         case ID_CHAR:
-            compile_push(tok, en, (cell) tok.val[1]);
+            compile_push(tok, (cell) tok.val[1]);
             break;
         case ID_FLT:
             printf("Floats are not implemented yet\n");
             exit(1);
         case ID_WORD:
-            compile_word(en, tok);
+            compile_word(tok);
             break;
         default:
             printf("Token id: %d\n", id);
@@ -544,1072 +250,66 @@ compile_token(struct environ *en,
 }
 
 void
-handle_token(struct environ *en,
-             struct token   tok) {
+handle_token(struct token tok) {
 
-    if (en->mode == MODE_INTERPRET) {
-        execute_token(en, tok);
+    if (mode == MODE_INTERPRET) {
+        execute_token(tok);
         return;
     }
 
-    if (en->mode == MODE_COMPILE) {
-        compile_token(en, tok);
+    if (mode == MODE_COMPILE) {
+        compile_token(tok);
         return;
     }
 }
 
-size_t
-stack_cells(struct stack *st) {
-    return (st->begin - st->cur)/sizeof(cell);
-}
-
-// Pushes the next cell onto stack, skips it
 void
-builtin_lit(struct environ *en,
-            struct token   tok) {
-
-    push(en, tok, &en->st, (cell) *en->ip);
-    ++en->ip;
-}
-
-// Pushes the string onto stack, skips it
-void
-builtin_strlit(struct environ *en,
-               struct token   tok) {
-
-    push(en, tok, &en->st, (cell) en->ip);
-
-    char *end = (char*)en->ip;
-    for (; *end; end++);
-
-    //printf("STRLIT: %s\n", (char*)en->ip);
-
-    en->ip = (cell*)(end + 1);
-}
-
-void
-builtin_ret(struct environ *en,
-            struct token   tok) {
-
-
-    cell new_ip = pop(en, tok, &en->rst);
-
-    //printf("RET to %p\n", (void*)new_ip);
-
-    en->ip = (cell*) new_ip;
-}
-
-void
-builtin_colon(struct environ *en,
-              struct token   tok) {
-    if (en->mode == MODE_COMPILE) {
-        error(tok, "Already in compilation mode");
-        return;
-    }
-
-    struct token name = next(en->inpt);
-
-    if (name.val == NULL) {
-        error(tok, "No name provided");
-        return;
-    }
-
-    en->newword_name = en->mem.cur;
-    strcpy(en->mem.cur, name.val);
-    en->mem.cur += strlen(name.val) + 1;
-
-    en->newword = en->mem.cur;
-
-    //printf(":: %p\n", en->newword);
-    //en->newword_sz = 0;
-
-    en->mode = MODE_COMPILE;
-
-    //en->xt = NULL;
-}
-
-// Pushes the current IP, sets the IP to the body
-void
-docol(struct environ *en, struct token tok) {
-    //printf("DOCOL %s\n", en->xt->name);
-    push(en, tok, &en->rst, (cell) en->ip);
-    en->ip = (cell*) en->xt->body;
-}
-
-void
-builtin_scolon(struct environ *en,
-               struct token   tok) {
-    if (en->mode != MODE_COMPILE) {
-        error(tok, "Not in the compilation mode");
-        return;
-    }
-
-    struct entry *ret = dict_search(en->dict, "ret");
-    if (ret == NULL) {
-        error(tok, "CRITICAL ERROR: no ret word defined! Unable to finish off word declaration");
-        exit(1);
-    }
-
-    *(cell*) en->mem.cur = (cell) ret;
-    en->mem.cur += sizeof(cell);
-    //++en->newword_sz;
-
-    //struct entry *prev = en->dict;
-    //printf("New word name: %s\n", en->newword_name);
-    en->dict = dict_append(&en->mem,
-                           en->dict,
-                           en->newword_name,
-                           0,
-                           //en->newword_sz,
-                           en->newword,
-                           docol);
-    //printf("Prev word: %p, this word: %p\n", prev, en->dict);
-
-    en->mode = MODE_INTERPRET;
-
-}
-
-void
-builtin_immediate(struct environ *en,
-                  struct token   tok) {
-    (void)tok;
-    (en->dict)->flags |= DICT_FLAG_IMMED;
-}
-
-void
-builtin_componly(struct environ *en,
-                 struct token   tok) {
-    (void)tok;
-    (en->dict)->flags |= DICT_FLAG_COMPONLY;
-}
-
-void
-builtin_intronly(struct environ *en,
-                 struct token   tok) {
-    (void)tok;
-    (en->dict)->flags |= DICT_FLAG_INTRONLY;
-}
-
-int
-expect_stack(struct environ *en,
-             struct stack *st,
-             struct token tok,
-             size_t num) {
-    if (stack_cells(st) < num) {
-        char buf[128];
-        snprintf(buf, 128, "Expected %lu cells on stack, got %lu", num, stack_cells(st));
-        error(tok, buf);
-        throw(en, tok, THROW_STACK_UNDERFLOW);
-        return 1;
-    }
-    return 0;
-}
-
-void
-builtin_into_r(struct environ *en,
-               struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell c = pop(en, tok, &en->st);
-    push(en, tok, &en->rst, c);
-}
-
-void
-builtin_from_r(struct environ *en,
-               struct token   tok) {
-    if (expect_stack(en, &en->rst, tok, 1)) return;
-    cell c = pop(en, tok, &en->rst);
-    push(en, tok, &en->st, c);
-}
-
-void
-builtin_top_r(struct environ *en,
-              struct token   tok) {
-    if (expect_stack(en, &en->rst, tok, 1)) return;
-    cell c = top(en, tok, &en->rst);
-    push(en, tok, &en->st, c);
-}
-
-void
-builtin_execute(struct environ *en,
-                struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    en->xt = (struct entry*)pop(en, tok, &en->st);
-
-    en->xt->code(en, tok);
-}
-
-void
-builtin_branch(struct environ *en,
-               struct token   tok) {
-    (void)tok;
-    cell off = *en->ip;
-    en->ip = (cell*) off;
-}
-
-void
-builtin_0branch(struct environ *en,
-                struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-
-    int cond = pop(en, tok, &en->st);
-    cell off = *en->ip;
-
-    if (cond) {
-        ++en->ip;
-        return;
-    }
-
-    en->ip = (cell*) off;
-}
-
-void
-builtin_cells(struct environ *en,
-              struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell num = pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) (num * sizeof(cell)));
-}
-
-void
-builtin_allot(struct environ *en,
-              struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell sz = pop(en, tok, &en->st);
-    en->mem.cur += sz;
-    check_mem(en, tok);
-    //printf("ALLOT: %ld\n", sz);
-}
-
-void
-builtin_here(struct environ *en,
-             struct token   tok) {
-    push(en, tok, &en->st, (cell)en->mem.cur);
-}
-
-void
-builtin_mode(struct environ *en,
-             struct token   tok) {
-    push(en, tok, &en->st, (cell)&en->mode);
-}
-
-void
-builtin_mem_begin(struct environ *en,
-                  struct token   tok) {
-    push(en, tok, &en->st, (cell)en->mem.mem);
-}
-
-void
-builtin_mem_end(struct environ *en,
-                struct token   tok) {
-    push(en, tok, &en->st, (cell)(en->mem.mem + en->mem.sz));
-}
-
-void
-builtin_at(struct environ *en,
-           struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell *addr = (cell*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, *addr);
-}
-
-void
-builtin_bat(struct environ *en,
-           struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    byte *addr = (byte*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) *addr);
-}
-
-void
-builtin_put(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-
-    cell *addr = (cell*) pop(en, tok, &en->st);
-    cell val = pop(en, tok, &en->st);
-
-    *addr = val;
-    //printf("!: %ld -> %p\n", val, addr);
-}
-
-void
-builtin_bput(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-
-    byte *addr = (byte*) pop(en, tok, &en->st);
-    byte val = (byte) pop(en, tok, &en->st);
-
-    //printf("BPUT %d:%d\n", tok.line, tok.col);
-    //printf("BPUT: %d -> %p\n", val, addr);
-
-    *addr = val;
-}
-
-// Allocate heap memory block
-void
-builtin_allocate(struct environ *en,
-                 struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell amount = pop(en, tok, &en->st);
-    void *p = malloc(amount);
-
-    push(en, tok, &en->st, (cell) p);
-
-    push(en, tok, &en->st,
-            p == NULL ? THROW_MALLOC_FAIL : 0);
-}
-
-// Resize heap memory block
-void
-builtin_resize(struct environ *en,
-               struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell size = pop(en, tok, &en->st);
-    void *p = (void*) pop(en, tok, &en->st);
-
-    p = realloc(p, size);
-
-    push(en, tok, &en->st, (cell) p);
-
-    push(en, tok, &en->st,
-            p == NULL ? THROW_REALLOC_FAIL : 0);
-}
-
-// Free heap block
-void
-builtin_free(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    void *p = (void*) pop(en, tok, &en->st);
-
-    free(p);
-
-    // This is a placeholder
-    // Standard free() does not allow safe recovery
-    // We may need to implement some sort of wrappers
-    push(en, tok, &en->st, 0);
-}
-
-// Install (any sort of) a memory block as a new memory
-void
-builtin_mem_install(struct environ *en,
-                    struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell size = pop(en, tok, &en->st);
-    char *p = (char*) pop(en, tok, &en->st);
-
-    // Too small
-    if (size < sizeof(struct memory)) {
-        push(en, tok, &en->st, THROW_MEM_INSTALL_FAIL);
-        return;
-    }
-
-    // Add metadata about the previous memory
-    *(struct memory*)p = en->mem;
-
-    en->mem.mem = p;
-    en->mem.cur = p + sizeof(struct memory);
-    en->mem.sz = size;
-
-    push(en, tok, &en->st, 0);
-}
-
-// Pop the topmost installed memory block
-void
-builtin_mem_pop(struct environ *en,
-                struct token   tok) {
-    struct memory metadata = *(struct memory*)en->mem.mem;
-    if (metadata.sz == 0) {
-        push(en, tok, &en->st, THROW_MEM_POP_FAIL);
-        return;
-    }
-
-    struct entry *dict = en->dict;
-    // While dictionary entries are within the currently installed memory segment
-    while (((char *)dict > en->mem.mem)
-         &&((char *)dict < (en->mem.mem + en->mem.sz))) {
-        if (dict == NULL) {
-            error(tok, "INTERNAL CRITICAL ERROR: No dictionary entry within new bounds were found!");
-            exit(1);
-        }
-        dict = dict->next;
-    }
-
-    en->dict = dict;
-
-    en->mem = metadata;
-
-    push(en, tok, &en->st, 0);
-}
-
-void
-builtin_pad(struct environ *en,
-            struct token   tok) {
-    push(en, tok, &en->st, (cell) en->pad);
-}
-
-void
-builtin_dict_search(struct environ *en,
-                    struct token   tok) {
-
-    struct token name = next(en->inpt);
-
-    struct entry *e = dict_search(en->dict, name.val);
-
-    //printf("Tick: (%s) %p -> %p\n", e->name, e, e->next);
-
-    push(en, tok, &en->st, (cell) e);
-}
-
-void
-builtin_dict(struct environ *en,
-            struct token   tok) {
-    push(en, tok, &en->st, (cell) en->dict);
-}
-
-void
-builtin_dict_next(struct environ *en,
-                  struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    struct entry *e = (struct entry*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) e->next);
-}
-
-void
-builtin_dict_name(struct environ *en,
-                  struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    struct entry *e = (struct entry*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) e->name);
-}
-
-void
-builtin_dict_flag(struct environ *en,
-                  struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    struct entry *e = (struct entry*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) e->flags);
-}
-
-void
-builtin_dict_code(struct environ *en,
-                  struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    struct entry *e = (struct entry*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) e->code);
-}
-
-void
-builtin_dict_body(struct environ *en,
-                  struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    struct entry *e = (struct entry*) pop(en, tok, &en->st);
-    push(en, tok, &en->st, (cell) e->body);
-}
-
-void
-builtin_drop(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    (void)pop(en, tok, &en->st);
-}
-
-void
-builtin_dup(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell c = top(en, tok, &en->st);
-    push(en, tok, &en->st, c);
-}
-
-void
-builtin_swap(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a);
-    push(en, tok, &en->st, b);
-}
-
-void
-builtin_over(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, b);
-    push(en, tok, &en->st, a);
-    push(en, tok, &en->st, b);
-}
-
-// a b c -- b c a
-void
-builtin_rot(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell c = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-    cell a = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, b);
-    push(en, tok, &en->st, c);
-    push(en, tok, &en->st, a);
-}
-
-void
-builtin_add(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a + b);
-}
-
-void
-builtin_mul(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a * b);
-}
-
-void
-builtin_div(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell b = pop(en, tok, &en->st);
-    cell a = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a/b);
-}
-
-void
-builtin_sub(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, b - a);
-}
-
-void
-builtin_equ(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a == b);
-}
-
-void
-builtin_not(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell c = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, !c);
-}
-
-void
-builtin_and(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a && b);
-}
-
-void
-builtin_or(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, a || b);
-}
-
-void
-builtin_less(struct environ *en,
-             struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, b < a);
-}
-
-void
-builtin_gr(struct environ *en,
-           struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell a = pop(en, tok, &en->st);
-    cell b = pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, b > a);
-}
-
-void
-builtin_source(struct environ *en,
-               struct token   tok) {
-    push(en, tok, &en->st, (cell) en->inpt->source);
-}
-
-void
-builtin_src_cur(struct environ *en,
-                 struct token   tok) {
-    push(en, tok, &en->st, (cell) en->inpt->cur);
-}
-
-void
-builtin_src2b(struct environ *en,
-              struct token   tok) {
-    push(en, tok, &en->st, *(en->inpt)->cur);
-    if (*(en->inpt)->cur) advance(en->inpt);
-}
-
-void
-builtin_b2t(struct environ *en,
-            struct token   tok) {
-    byte b = (byte)pop(en, tok, &en->st);
-    write(STDOUT_FILENO, &b, 1);
-}
-
-void
-builtin_cr(struct environ *en,
-           struct token   tok) {
-    (void)en;
-    (void)tok;
-    write(STDOUT_FILENO, "\n", 1);
-}
-
-void
-builtin_dot(struct environ *en,
-            struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell c = pop(en, tok, &en->st);
-    char buf[256];
-    snprintf(buf, 256, "%ld", c);
-    write(STDOUT_FILENO, buf, strlen(buf));
-}
-
-int refill(struct input *st);
-int
-check_fd_readable(int fd) {
-    struct stat st;
-    if (fstat(fd, &st)) return 0;
-    // There's nothing like S_ISREADABLE...
-    // Maybe somehow check otherwise?
-
-    return 1;
-}
-void
-builtin_file_as_source(struct environ *en,
-                       struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    int f = (int)pop(en, tok, &en->st);
-
-    if (!check_fd_readable(f)) {
-        push(en, tok, &en->st, THROW_IO_ERR);
-        return;
-    }
-
-    struct input new_in = {0};
-    new_in.source_file = f;
-    en->inps = inputs_append(en->inps, new_in);
-    en->inpt = inputs_top(en->inps); 
-    refill(en->inpt);
-
-    push(en, tok, &en->st, 0);
-}
-
-int
-mode_by_method(int m) {
-    //printf("Method: %d\n", m);
-    switch(m) {
-        // r/o
-        case 0:
-            return O_RDONLY;
-        // w/o
-        case 1:
-            // Don't truncate files
-            return O_WRONLY | O_APPEND | O_CREAT;
-        // r/w
-        case 2:
-            return O_RDWR | O_APPEND | O_CREAT;
-    }
-    return -1;
-}
-
-void
-builtin_open_file(struct environ *en,
-                  struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell method = pop(en, tok, &en->st);
-    char *filename = (char*)pop(en, tok, &en->st);
-    int mode = mode_by_method(method);
-    
-    if (mode == -1) {
-        push(en, tok, &en->st, (cell)-1);
-        push(en, tok, &en->st, THROW_INVALID_ARGUMENT);
-        return;
-    }
-
-    int f = open(filename, mode);
-
-    if (f < 0) {
-        push(en, tok, &en->st, -1);
-        // This is not the only possible reason...
-        push(en, tok, &en->st, THROW_FILE_NONEXISTENT);
-        return;
-    }
-
-    push(en, tok, &en->st, (cell)f);
-    push(en, tok, &en->st, 0);
-}
-
-void
-builtin_file_create(struct environ *en,
-                    struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 2)) return;
-    cell method =  pop(en, tok, &en->st);
-    char *filename = (char*)pop(en, tok, &en->st);
-    int mode = mode_by_method(method);
-
-    if (mode == 0) {
-        push(en, tok, &en->st, (cell)-1);
-        push(en, tok, &en->st, THROW_INVALID_ARGUMENT);
-        return;
-    }
-
-    int f = open(filename, mode | O_CREAT | O_TRUNC,
-                    S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-
-    if (f < 0) {
-        perror("open()");
-        push(en, tok, &en->st, -1);
-        // Which error code to throw?
-        push(en, tok, &en->st, THROW_IO_ERR);
-        return;
-    }
-
-    push(en, tok, &en->st, (cell)f);
-    push(en, tok, &en->st, 0);
-}
-
-void
-builtin_close_file(struct environ *en,
-                   struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    int file = (int)pop(en, tok, &en->st);
-
-    push(en, tok, &en->st, !!close(file));
-}
-
-void
-builtin_file_size(struct environ *en,
-                  struct token   tok) {
-    if(expect_stack(en, &en->st, tok, 1)) return;
-    int fd = (int)pop(en, tok, &en->st);
-
-    off_t off = lseek(fd, 0, SEEK_CUR);
-
-    if (off < 0) {
-        push(en, tok, &en->st, 0);
-        push(en, tok, &en->st, THROW_IO_ERR);
-        return;
-    }
-
-    if (lseek(fd, 0, SEEK_SET)) {
-        push(en, tok, &en->st, 0);
-        push(en, tok, &en->st, THROW_IO_ERR);
-        return;
-    }
-
-    off_t end = lseek(fd, 0, SEEK_END);
-
-    if (end < 0) {
-        push(en, tok, &en->st, 0);
-        push(en, tok, &en->st, THROW_IO_ERR);
-        return;
-    }
-
-    if (lseek(fd, off, SEEK_SET)) {
-        push(en, tok, &en->st, 0);
-        push(en, tok, &en->st, THROW_IO_ERR);
-        return;
-    }
-
-    push(en, tok, &en->st, (cell)end);
-    push(en, tok, &en->st, 0);
-}
-
-
-// ( ptr sz fd -- num ior)
-void
-builtin_file_read(struct environ *en,
-                  struct token   tok) {
-    if(expect_stack(en, &en->st, tok, 3)) return;
-    int fd = (int)pop(en, tok, &en->st);
-    cell sz = (cell)pop(en, tok, &en->st);
-    char *ptr = (char*)pop(en, tok, &en->st);
-
-    ssize_t got = read(fd, ptr, sz);
-    push(en, tok, &en->st, (cell)got);
-
-    if (got >= 0)
-        push(en, tok, &en->st, 0);
-    else
-        push(en, tok, &en->st, THROW_IO_ERR);
-}
-
-// ( ptr sz fd -- num ior)
-void
-builtin_file_write(struct environ *en,
-                   struct token   tok) {
-    if(expect_stack(en, &en->st, tok, 3)) return;
-    int fd = (int)pop(en, tok, &en->st);
-    cell sz = (cell)pop(en, tok, &en->st);
-    char *ptr = (char*)pop(en, tok, &en->st);
-
-    ssize_t got = write(fd, ptr, sz);
-    push(en, tok, &en->st, (cell)got);
-
-    if (got >= 0)
-        push(en, tok, &en->st, 0);
-    else
-        push(en, tok, &en->st, THROW_IO_ERR);
-}
-
-void
-builtin_catch(struct environ *en,
-              struct token   tok) {
-    (void) tok;
-    en->catch = en->ip;
-    en->catch_st = en->st.cur;
-    en->catch_rst = en->rst.cur;
-
-    push(en, tok, &en->st, 0);
-}
-
-void
-throw(struct environ *en,
-      struct token   tok,
+throw(struct token tok,
       cell           val) {
 
     if (!val) return;
 
-    cell *before = en->ip;
+    cell *before = ip;
 
-    en->ip = en->catch;
-    en->st.cur = en->catch_st;
-    en->rst.cur = en->catch_rst;
+    ip = catch;
+    st.cur = catch_st;
+    rst.cur = catch_rst;
 
     // Toplevel catcher
-    if (en->ip == NULL) {
+    if (ip == NULL) {
         printf("(%d:%d '%s') CAUGHT %ld from %p\n",
                 tok.line+1, tok.col+1, tok.val, val, before);
         fflush(stdout);
         // Error wasn't caught, terminate source execution
-        en->terminate = 1;
+        terminate = 1;
         return;
     }
 
-    push(en, tok, &en->st, val);
+    push(tok, &st, val);
 }
 
-void
-builtin_throw(struct environ *en,
-              struct token   tok) {
-    if (expect_stack(en, &en->st, tok, 1)) return;
-    cell val = pop(en, tok, &en->st);
-
-    throw(en, tok, val);
-}
-
-// Helper code word
-// Push the value stored in the body pointer
-void
-crpush(struct environ *en, struct token tok) {
-    push(en, tok, &en->st, (cell) en->xt->body);
-}
+#include "builtins.h"
 
 void
-builtin_create(struct environ *en,
-               struct token   tok) {
-    struct token name = next(en->inpt);
-
-    if (name.val == NULL) {
-        error(tok, "No name provided");
-        return;
-    }
-
-    en->newword_name = en->mem.cur;
-    strcpy(en->mem.cur, name.val);
-    en->mem.cur += strlen(name.val) + 1;
-
-    en->dict = dict_append(&en->mem,
-                           en->dict,
-                           en->newword_name,
-                           0,
-                           NULL,
-                           crpush);
-
-    // Set the data field pointer
-    en->dict->body = en->mem.cur;
-}
-
-// Helper code word for does>
-// Push the first cell of the body
-// Set IP to the value of the second cell of the body
-void
-pushjump(struct environ *en, struct token tok) {
-    //printf("PUSHJUMP: %ld, %p\n",
-    //        (cell) *(cell*) en->xt->body,
-    //        (cell*) *(((cell*) en->xt->body) + 1));
-    push(en, tok, &en->st, *(cell*) en->xt->body);
-
-    push(en, tok, &en->rst, (cell) en->ip);
-    en->ip = (cell*) *(((cell*) en->xt->body) + 1);
-}
-
-void
-builtin_does(struct environ *en,
-             struct token   tok) {
-
-    struct entry *word = en->dict;
-
-    // Compile helper word
-    // Helper word:
-    // Push data pointer
-    // Execute the code that follows does>
-    char *helperbody = (char*) en->mem.cur;
-    // Push
-    *(cell*) en->mem.cur = (cell) word->body;
-    en->mem.cur += sizeof(cell);
-    // Jump
-    *(cell*) en->mem.cur = (cell) en->ip;
-    en->mem.cur += sizeof(cell);
-
-    // Modify the CREATEd word
-    word->code = pushjump;
-    word->body = helperbody;
-
-    // Return
-    cell new_ip = pop(en, tok, &en->rst);
-    en->ip = (cell*) new_ip;
-}
-
-void
-builtin_stackdump(struct environ *en,
-                  struct token   tok) {
-    printf("(%s %d:%d) initiating stack dump\n", tok.val, tok.line, tok.col);
-    printf("      DATA STACK\n");
-    for (cell *p = (cell*) en->st.cur; p < (cell*) en->st.begin; p++) {
-        if (*p < 128 && *p != '\n')
-            printf("  %16ld ('%c') %11p\n", *p, (char)*p, (void*)*p);
-        else
-            printf("  %16ld %16p\n", *p, (void*)*p);
-    }
-    printf("      RETURN STACK\n");
-    for (cell *p = (cell*) en->rst.cur; p < (cell*) en->rst.begin; p++) {
-        printf("  %16ld %16p\n", *p, (void*)*p);
-    }
-    fflush(stdout);
-    //raise(SIGINT);
-    //exit(0);
-}
-
-void
-builtin_worddump(struct environ *en,
-                 struct token   tok) {
-    printf("(%s %d:%d) initiating word dump\n", tok.val, tok.line, tok.col);
-
-    struct token tk = next(en->inpt);
-    if (tk.val == NULL || !strlen(tk.val)) {
-        error(tok, "No argument provided for worddump!");
-        //raise(SIGINT);
-        exit(1);
-    }
-
-    struct entry *e = dict_search(en->dict, tk.val);
-
-    if (e == NULL) {
-        error(tok, "Word doesn't exist");
-        //raise(SIGINT);
-        exit(1);
-    }
-
-    printf("Worddump for '%s'\n", e->name);
-    if (e->code != docol) {
-        printf("<assembly>\n");
-        return;
-    }
-    for (struct entry **w = (struct entry**) e->body;
-         (*w)->code != builtin_ret; w++) {
-
-        printf("  %s ", (*w)->name);
-
-        if ((*w)->code == builtin_lit) {
-            printf("%ld\n", *(((cell*)w)+1));
-            w++;
-        }
-        else if ((*w)->code == builtin_strlit) {
-            char *str = (char *)(w + 1);
-            printf("%s\n", str);
-
-            char *end = str;
-            for (; *end; end++);
-
-            w = ((struct entry**) (end + 1)) - 1; 
-        }
-        else if ((*w)->code == builtin_branch ||
-            (*w)->code == builtin_0branch) {
-
-            cell *p = (cell*)*(((cell*)w)+1);
-
-            printf("%p (%ld)\n", p, p - (cell*)w);
-            w++;
-        }
-        else putchar('\n');
-    }
-
-    fflush(stdout);
-    //raise(SIGINT);
-    //exit(0);
-}
-
-void
-eval(struct environ *en) {
-
-    struct token tok = next(en->inpt);
+eval() {
+    struct token tok = next(inpt);
 
     while (tok.val != NULL) {
         if (!strlen(tok.val)) {
-            tok = next(en->inpt);
+            tok = next(inpt);
             continue;
         }
         //printf("(%d:%d '%s')\n", tok.line + 1, tok.col + 1, tok.val);
-        handle_token(en, tok);
+        handle_token(tok);
 
-        if (en->terminate) break;
+        if (terminate) break;
 
-        tok = next(en->inpt);
+        tok = next(inpt);
     }
 }
 
-//char *
-//readfile(const char *filename) {
+//byte *
+//readfile(const byte *filename) {
 //    FILE *f = fopen(filename, "r");
 //
 //    if (f == NULL) {
@@ -1617,7 +317,7 @@ eval(struct environ *en) {
 //        return NULL;
 //    }
 //
-//    char *code = NULL;
+//    byte *code = NULL;
 //    size_t code_sz = 0;
 //
 //    while (!feof(f) && !ferror(f)) {
@@ -1636,6 +336,7 @@ int
 refill(struct input *st) {
     size_t i = 0;
 
+    //TODO: why are we reading byte-by-byte?
     for (; i < SOURCE_SIZE - 1; i++) {
         char c;
         int got = read(st->source_file, &c, 1);
@@ -1657,58 +358,15 @@ refill(struct input *st) {
 
     st->cur = st->source;
 
-    //printf("Refilled: %s\n", st->source);
-
     return 0;
 }
 
 void
-builtin_refill(struct environ *en,
-               struct token   tok) {
-    push(en, tok, &en->st, refill(en->inpt));
-}
-
-void
-builtin_quit(struct environ *en,
-             struct token    tok) {
-    (void)tok;
-    free(en->inps);
-    free(en->mem.mem);
-    free(en->pad);
-    exit(0);
-}
-
-int
-main(int argc, char **argv) {
-    if (argc < 2) {
-        printf("Please note that XT is basically non-functional without\n");
-        printf("a file that lays out definitions of some basic words\n");
-        printf("You can use basis.f, which should come together with XT: %s basis.f\n", argv[0]);
-    }
-
-    char *mem_buf = malloc(MEMORY_SIZE);
-
-    // Add metadata about the previous memory (non-existent)
-    *(struct memory*)mem_buf = (struct memory) {
-        NULL, NULL, 0
-    };
-
-    struct memory mem = {
-        mem_buf,
-        mem_buf + sizeof(struct memory),
-        MEMORY_SIZE
-    };
-
-    struct stack stk = new_stack(&mem, STACK_SIZE);
-    struct stack rstk = new_stack(&mem, RSTACK_SIZE);
-
-    char mode = MODE_INTERPRET;
-
-    char *pad = malloc(PAD_SIZE);
-
-    struct entry *dict = NULL;
-
-    // Hide these words somehow
+init_dict(void) {
+//Dictionary initialization {{{
+// This is huge and ugly, but c'est la vie. Using some sort of a loop would
+// require introducing additional data structures and redundant complexity,
+// which makes no sense, since this is only one function.
     dict = dict_append_builtin(&mem, dict, "lit", 0, builtin_lit);
     dict = dict_append_builtin(&mem, dict, "strlit", 0, builtin_strlit);
     dict = dict_append_builtin(&mem, dict, "ret", 0, builtin_ret);
@@ -1798,27 +456,57 @@ main(int argc, char **argv) {
     dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);
 
     dict = dict_append_builtin(&mem, dict, "quit", 0, builtin_quit);
+//}}}
+}
 
-    struct environ en = {
-         NULL,
-         NULL,
-         mem,
-         stk,
-         rstk,
-         dict,
-         mode,
-         pad,
-         NULL,
-         NULL,
-         NULL,
-         NULL,
-         NULL,
-         (char*) stk.cur,
-         (char*) rstk.cur,
-         0
+int
+main(int argc, char **argv) {
+    if (argc < 2) {
+        printf("Please note that XT is basically non-functional without\n");
+        printf("a file that lays out definitions of some basic words\n");
+        printf("You can use basis.f, which should come together with XT: %s basis.f\n", argv[0]);
+    }
+
+    byte *mem_buf = malloc(MEMORY_SIZE);
+
+    if (mem_buf == NULL) {
+        perror("malloc()");
+        exit(1);
+    }
+
+    // Add metadata about the previous memory (non-existent)
+    *(struct memory*)mem_buf = (struct memory) {
+        NULL, NULL, 0
     };
 
-    struct inputs *inps = malloc(sizeof(struct input));
+    mem = (struct memory) {
+        mem_buf,
+        mem_buf + sizeof(struct memory),
+        MEMORY_SIZE
+    };
+
+    st = new_stack(&mem, STACK_SIZE);
+    rst = new_stack(&mem, RSTACK_SIZE);
+
+    mode = MODE_INTERPRET;
+
+    pad = malloc(PAD_SIZE);
+
+    if (pad == NULL) {
+        perror("malloc()");
+        exit(1);
+    }
+
+    dict = NULL;
+
+    init_dict();
+
+    inps = malloc(sizeof(struct input));
+    if (inps == NULL) {
+        perror("malloc()");
+        exit(1);
+    }
+
     inps->num = 0;
 
     struct input term = {0};
@@ -1837,11 +525,12 @@ main(int argc, char **argv) {
         inps = inputs_append(inps, in);
     }
 
-    en.inps = inps;
-
+    // We use write() instead of printf() here to avoid
+    // buffering issues, since the I/O builtins operate on
+    // the fd-level, while printf() is a FILE* abstraction
     for (;;) {
-        struct input *in = inputs_top(en.inps);
-        en.inpt = in;
+        struct input *in = inputs_top(inps);
+        inpt = in;
 
         // End of all sources
         if (in == NULL) break;
@@ -1849,18 +538,18 @@ main(int argc, char **argv) {
         if (in->source_file == STDIN_FILENO)
             write(STDOUT_FILENO, "> ", 2);
 
-        while (!refill(inputs_top(en.inps))) {
-            eval(&en);
+        while (!refill(inputs_top(inps))) {
+            eval();
 
-            in = inputs_top(en.inps);
+            in = inputs_top(inps);
 
-            if (en.terminate) {
-                en.terminate = 0;
-                if (en.mode == MODE_COMPILE) {
+            if (terminate) {
+                terminate = 0;
+                if (mode == MODE_COMPILE) {
                     // Exit compilation mode
-                    en.mode = MODE_INTERPRET;
+                    mode = MODE_INTERPRET;
                     // Reset memory to pre-compilation state
-                    en.mem.mem = en.newword;
+                    mem.mem = newword;
                 }
                 if (in->source_file != STDIN_FILENO) break;
                 continue;
@@ -1869,10 +558,10 @@ main(int argc, char **argv) {
                 write(STDOUT_FILENO, "> ", 2);
         }
 
-        en.inps = inputs_pop(en.inps);
+        inps = inputs_pop(inps);
     }
 
-    free(en.inps);
+    free(inps);
     free(mem.mem);
     free(pad);
 }

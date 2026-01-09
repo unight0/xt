@@ -12,7 +12,7 @@ $(TARGET): $(OBJS)
 	$(LD) $(LDFLAGS) $^ -o $@
 
 $(OBJS): $(SRCS)
-	$(CC) $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) -c $^
 
 clean:
 	rm $(OBJS)
