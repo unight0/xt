@@ -11,8 +11,8 @@ OBJS = $(SRCS:.c=.o)
 $(TARGET): $(OBJS)
 	$(LD) $(LDFLAGS) $^ -o $@
 
-$(OBJS): $(SRCS)
-	$(CC) $(CFLAGS) -c $^
+%.o: %.c
+	$(CC) $(CFLAGS) -c $<
 
 clean:
 	rm $(OBJS)

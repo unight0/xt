@@ -503,7 +503,7 @@ builtin_equ(struct token tok) {
     cell a = pop(tok, &st);
     cell b = pop(tok, &st);
 
-    push(tok, &st, a == b);
+    push(tok, &st, a == b ? -1 : 0);
 }
 
 void
@@ -511,7 +511,7 @@ builtin_not(struct token tok) {
     if (expect_stack(&st, tok, 1)) return;
     cell c = pop(tok, &st);
 
-    push(tok, &st, !c);
+    push(tok, &st, ~c);
 }
 
 void
@@ -520,7 +520,7 @@ builtin_and(struct token tok) {
     cell a = pop(tok, &st);
     cell b = pop(tok, &st);
 
-    push(tok, &st, a && b);
+    push(tok, &st, a & b);
 }
 
 void
@@ -529,7 +529,7 @@ builtin_or(struct token tok) {
     cell a = pop(tok, &st);
     cell b = pop(tok, &st);
 
-    push(tok, &st, a || b);
+    push(tok, &st, a | b);
 }
 
 void
@@ -538,7 +538,7 @@ builtin_less(struct token tok) {
     cell a = pop(tok, &st);
     cell b = pop(tok, &st);
 
-    push(tok, &st, b < a);
+    push(tok, &st, b < a ? -1 : 0);
 }
 
 void
@@ -547,7 +547,7 @@ builtin_gr(struct token tok) {
     cell a = pop(tok, &st);
     cell b = pop(tok, &st);
 
-    push(tok, &st, b > a);
+    push(tok, &st, b > a ? -1 : 0);
 }
 
 void

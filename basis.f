@@ -22,7 +22,7 @@
 : parse
   &src swap
   while src>b over over != begin
-    not if refill throw then
+    0 = if refill throw then
   done
   drop drop
   0 &src 1 - b!
