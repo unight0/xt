@@ -403,7 +403,6 @@ init_dict(void) {
     dict = dict_append_builtin(&mem, dict, "->name", 0, builtin_dict_name);
     dict = dict_append_builtin(&mem, dict, "->flag", 0, builtin_dict_flag);
     dict = dict_append_builtin(&mem, dict, "->code", 0, builtin_dict_code);
-    //dict = dict_append_builtin(&mem, dict, "->bdsz", 0, builtin_dict_bdsz);
     dict = dict_append_builtin(&mem, dict, "->body", 0, builtin_dict_body);
 
     dict = dict_append_builtin(&mem, dict, ":", 0, builtin_colon);
@@ -432,10 +431,10 @@ init_dict(void) {
 
     dict = dict_append_builtin(&mem, dict, "refill", 0, builtin_refill);
     dict = dict_append_builtin(&mem, dict, "source", 0, builtin_source);
-    dict = dict_append_builtin(&mem, dict, "&src", 0, builtin_src_cur);
-    dict = dict_append_builtin(&mem, dict, "src>b", 0, builtin_src2b);
-    dict = dict_append_builtin(&mem, dict, "b>t", 0, builtin_b2t);
-    dict = dict_append_builtin(&mem, dict, "cr", 0, builtin_cr);
+    dict = dict_append_builtin(&mem, dict, "*source", 0, builtin_src_cur);
+    dict = dict_append_builtin(&mem, dict, "source>", 0, builtin_src2b);
+    dict = dict_append_builtin(&mem, dict, ">term", 0, builtin_b2t);
+    //dict = dict_append_builtin(&mem, dict, "cr", 0, builtin_cr);
     dict = dict_append_builtin(&mem, dict, ".", 0, builtin_dot);
 
     dict = dict_append_builtin(&mem, dict, "file-open", 0, builtin_open_file);
@@ -450,7 +449,7 @@ init_dict(void) {
     dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);
 
     dict = dict_append_builtin(&mem, dict, "create", 0, builtin_create);
-    dict = dict_append_builtin(&mem, dict, "does>", DICT_FLAG_COMPONLY, builtin_does);
+    dict = dict_append_builtin(&mem, dict, "does>", 0/*DICT_FLAG_COMPONLY*/, builtin_does);
 
     dict = dict_append_builtin(&mem, dict, "stackdump", 0, builtin_stackdump);
     dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);

@@ -16,16 +16,17 @@
 : done swap postpone branch , here swap ! ; immediate compile-only
 
 : != = not ;
+: 0= 0 = ;
 
-: \ while src>b dup 10 != and begin done ; immediate
+: \ while source> dup 10 != and begin done ; immediate
 \ ('X' parse <cc>X -- str-ptr )
 : parse
-  &src swap
-  while src>b over over != begin
+  *source swap
+  while source> over over != begin
     0 = if refill throw then
   done
   drop drop
-  0 &src 1 - b!
+  0 *source 1 - b!
 ;
 : ( ')' parse drop ; immediate
 ( this is a 
@@ -54,10 +55,12 @@
 : mem-used here mem-begin - ;
 : mem-left mem-end here - ;
 
-( s -- )
-: type while dup b@ 0 != begin dup b@ b>t 1 + done drop ;
 ( -- )
-: words dict while dup 0 != begin dup ->name type 32 b>t ->next done drop cr ;
+: nl 10 >term ;
+( s -- )
+: type while dup b@ 0 != begin dup b@ >term 1 + done drop ;
+( -- )
+: words dict while dup 0 != begin dup ->name type 32 >term ->next done drop nl ;
 ( -- )
 : count-words 0 dict while dup 0 != begin swap 1 + swap ->next done drop ;
 
@@ -91,7 +94,7 @@
 : s(  ['] strlit ,
   ')' parse here strcpy strlen 1 + allot
 ; immediate compile-only
-: mem-report mem-used . '/' b>t mem-total . s"  bytes used" type cr ; interpret-only
+: mem-report mem-used . '/' >term mem-total . s"  bytes used" type nl ; interpret-only
 \ Works similar to s", but for interpretation mode
 ( $" <str>" -- str-ptr )
 : $" '"' parse here strcpy dup strlen 1 + allot ; interpret-only
@@ -145,6 +148,9 @@
 \ That cell is initialized with the specified value
 ( value variable <spaces>name -- )
 : variable create , ;
+\ Write value to variable X
+( value to <spaces>X -- )
+: to ' dup 0= if drop -13 throw then execute ! ;
 
 \ EXPERIMENTAL
 \ A convenience word for allocating some memory on the
