@@ -6,10 +6,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#define PAD_SIZE           1024
-#define MODE_INTERPRET     0
-#define MODE_COMPILE       1
-
 //TODO?: change our execution mode from Indirect-Threaded
 //Code to Subroutine-Threaded Code. (JIT compilation)
 //That means:
@@ -42,26 +38,26 @@
 // variables are exactly the entirety of its state. It makes no sense to have
 // several interpretation instances within one XT instance.
 /* General */
-static struct inputs    *inps;
-static struct input     *inpt;
-static struct memory     mem;
-static struct stack      st;
-static struct stack      rst;
-static struct entry     *dict;
-static byte              mode;
-static byte             *pad;
+struct inputs    *inps;
+struct input     *inpt;
+struct memory     mem;
+struct stack      st;
+struct stack      rst;
+struct entry     *dict;
+byte              mode;
+byte             *pad;
 
 /* Used for compilation mode */
-static char             *newword_name;
-static byte             *newword;
+char             *newword_name;
+byte             *newword;
 
 /* Inner interpreter */
-static cell             *ip;
-static struct entry     *xt; 
-static cell             *catch;
-static byte             *catch_st;
-static byte             *catch_rst;
-static byte              terminate;
+cell             *ip;
+struct entry     *xt; 
+cell             *catch;
+byte             *catch_st;
+byte             *catch_rst;
+byte              terminate;
 
 void throw(struct token, cell);
 

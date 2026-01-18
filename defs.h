@@ -24,6 +24,11 @@
 #define THROW_INTRONLY_WORD    -998
 #define THROW_OUT_OF_MEM       -999
 
+#define PAD_SIZE           1024
+#define MODE_INTERPRET     0
+#define MODE_COMPILE       1
+
+
 typedef uint64_t cell;
 typedef uint8_t  byte;
 
