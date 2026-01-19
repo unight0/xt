@@ -17,8 +17,10 @@
 
 : != = not ;
 : 0= 0 = ;
+: 0!= 0 != ;
+: nl 10 >term ;
 
-: \ while source> dup 10 != and begin done ; immediate
+: \ while source> dup 10 != 0!= and begin done ; immediate
 \ ('X' parse <cc>X -- str-ptr )
 : parse
   *source swap
@@ -55,8 +57,6 @@
 : mem-used here mem-begin - ;
 : mem-left mem-end here - ;
 
-( -- )
-: nl 10 >term ;
 ( s -- )
 : type while dup b@ 0 != begin dup b@ >term 1 + done drop ;
 ( -- )
@@ -152,30 +152,51 @@
 ( value to <spaces>X -- )
 : to ' throw execute ! ;
 
+: nil 0 ;
+\ Linked List structure:
+\ { Next (1 cell), Value (1 cell) }
+( ll -- ll )
+: ll->next @ ;
+( ll -- v )
+: ll->value 1 cells + @ ;
+( v -- tail )
+: ll-new  here nil , swap , ;
+( v head -- head )
+: ll-prepend here swap , swap , ;
+( v after -- new-node )
+: ll-insert
+    dup ll->next here swap ,
+    rot ,
+    over !
+;
+\ Find the tail node of the linked list
+( ll -- tail )
+: ll-tail
+  while dup ll->next nil != begin
+    ll->next
+  done
+;
+\ Append a new element after the tail node
+( v ll -- new-node )
+: ll-append
+    ll-tail ll-insert
+;
+\ Print the linked list
+( ll -- )
+: ll.
+  while dup nil != begin
+    dup ll->value . 32 >term
+    ll->next
+  done
+;
+
 \ EXPERIMENTAL
 \ A convenience word for allocating some memory on the
 \ heap and installing it as the current working memory
-\ Previous memory is preserved and its metadata
-\ is preserved in the first several dozen bytes
-\ of the new memory segment
-\ mem-pop can be used later to return to previous memory
-\ segment
 ( sz -- ior )
 : mem-new
     dup heap-allocate
     dup if ret then drop
     swap mem-install
 ;
-\ Idea: named scopes (or modules?).
-\ Words belong to the scope they are defined in
-\ We can easily remove unneeded groups of words from
-\ our dictionary
-\ How we implement it depends on the way memory
-\ segments are going to work
-\ Right now, we have something closer to a stack of
-\ memory segments. This means that when we remove
-\ a scope all of the scopes that are newer will be
-\ removed, too. However, if we make our memory segments
-\ closer to a proper linked list, we can remove
-\ individual scopes without affecting the ones that
-\ were created later
+

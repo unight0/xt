@@ -414,9 +414,9 @@ main(int argc, char **argv) {
     }
 
     // Add metadata about the previous memory (non-existent)
-    *(struct memory*)mem_buf = (struct memory) {
-        NULL, NULL, 0
-    };
+    //*(struct memory*)mem_buf = (struct memory) {
+    //    NULL, NULL, 0
+    //};
 
     mem = (struct memory) {
         mem_buf,

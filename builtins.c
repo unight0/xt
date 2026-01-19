@@ -357,10 +357,10 @@ builtin_mem_install(struct token tok) {
     }
 
     // Add metadata about the previous memory
-    *(struct memory*)p = mem;
+    //*(struct memory*)p = mem;
 
     mem.mem = p;
-    mem.cur = p + sizeof(struct memory);
+    mem.cur = p /*+ sizeof(struct memory)*/;
     mem.sz = size;
 
     push(tok, &st, 0);
@@ -1019,7 +1019,7 @@ init_dict(void) {
     dict = dict_append_builtin(&mem, dict, "heap-resize", 0, builtin_resize);
     dict = dict_append_builtin(&mem, dict, "heap-free", 0, builtin_free);
     dict = dict_append_builtin(&mem, dict, "mem-install", 0, builtin_mem_install);
-    dict = dict_append_builtin(&mem, dict, "mem-pop", 0, builtin_mem_pop);
+    //dict = dict_append_builtin(&mem, dict, "mem-pop", 0, builtin_mem_pop);
 
     dict = dict_append_builtin(&mem, dict, "pad", 0, builtin_pad);
     dict = dict_append_builtin(&mem, dict, "'", 0, builtin_dict_search);
