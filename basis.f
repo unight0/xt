@@ -1,7 +1,7 @@
 : , here ! 1 cells allot ;
 : b, here b! 1 allot ;
-: [ 0 mode b! ; immediate compile-only
-: ] 1 mode b! ; interpret-only
+: [ 0 mode ! ; immediate compile-only
+: ] -1 mode ! ; interpret-only
 : 'lit [ ' lit throw dup , , ] ;
 : lit, 'lit , , ;
 : ['] ' throw lit, ; immediate compile-only
@@ -15,6 +15,7 @@
 : begin here 1 cells + postpone 0branch 0 , ; immediate compile-only
 : done swap postpone branch , here swap ! ; immediate compile-only
 
+: 1+ 1 + ;
 : != = not ;
 : 0= 0 = ;
 : 0!= 0 != ;
@@ -84,6 +85,24 @@
   done
   drop 0 swap b!
 ;
+\ Are strings equal?
+( s1 s2 -- b )
+: streq?
+ while
+   \ End of both strings
+   over b@ over b@
+   0!= swap 0!=
+   and
+ begin
+    \ One string has ended before another?
+    over over 0!= swap 0!= xor if drop drop 0 ret then
+    \ Chars not equal?
+    over b@ over b@ != if drop drop 0 ret then
+    \ Advance
+    1+ swap 1+
+ done
+ -1
+;
 \ Compile string push into a word
 ( s" <str>" -- str-ptr )
 : s"  ['] strlit ,
@@ -113,11 +132,6 @@
 : r/o 0 ;
 : w/o 1 ;
 : r/w 2 ;
-
-\ Evaluate the contents of the specified file
-\ Example usage: $" test.f" include
-( filename -- )
-: include r/o file-open throw file-as-source throw ;
 
 \ Terminates buffer with a \0 character
 \ Equivalent to buf[len] = '\0';
@@ -149,10 +163,20 @@
 ( value variable <spaces>name -- )
 : variable create , ;
 \ Write value to variable X
+\ This is a state-smart word
 ( value to <spaces>X -- )
-: to ' throw execute ! ;
+: to mode @ not if
+    \ Interpretation
+    ' throw execute ! ret then
+    \ Compilation
+    ' throw lit, postpone execute postpone !
+; immediate
 
-: nil 0 ;
+0 constant false
+-1 constant true
+
+0 constant nil
+
 \ Linked List structure:
 \ { Next (1 cell), Value (1 cell) }
 ( ll -- ll )
@@ -190,6 +214,39 @@
   done
 ;
 
+\ Require functionality
+nil variable Sources
+( file -- )
+: included
+    Sources @ ll-prepend Sources !
+;
+( file -- )
+: included?
+  Sources @
+  while dup nil != begin
+    over over
+    ll->value
+    streq? if drop drop true ret then
+    ll->next
+  done
+  drop drop false
+;
+
+\ Evaluate the contents of the specified file
+\ Example usage: $" test.f" include
+( filename -- <???> )
+: include
+  dup included
+  r/o file-open throw file-as-source throw
+;
+\ Same as include, but checks if the file was included before
+\ to avoid double-inclusion
+( filename -- <???> )
+: require
+  dup included? if drop ret then
+  include
+;
+
 \ EXPERIMENTAL
 \ A convenience word for allocating some memory on the
 \ heap and installing it as the current working memory
@@ -199,4 +256,3 @@
     dup if ret then drop
     swap mem-install
 ;
-

@@ -15,7 +15,7 @@ extern struct memory     mem;
 extern struct stack      st;
 extern struct stack      rst;
 extern struct entry     *dict;
-extern byte              mode;
+extern cell              mode;
 extern byte             *pad;
 
 /* Used for compilation mode */
@@ -571,6 +571,15 @@ builtin_or(struct token tok) {
 }
 
 void
+builtin_xor(struct token tok) {
+    if (expect_stack(&st, tok, 1)) return;
+    cell a = pop(tok, &st);
+    cell b = pop(tok, &st);
+
+    push(tok, &st, a ^ b);
+}
+
+void
 builtin_less(struct token tok) {
     if (expect_stack(&st, tok, 2)) return;
     cell a = pop(tok, &st);
@@ -1051,6 +1060,7 @@ init_dict(void) {
     dict = dict_append_builtin(&mem, dict, "not", 0, builtin_not);
     dict = dict_append_builtin(&mem, dict, "and", 0, builtin_and);
     dict = dict_append_builtin(&mem, dict, "or", 0, builtin_or);
+    dict = dict_append_builtin(&mem, dict, "xor", 0, builtin_xor);
     dict = dict_append_builtin(&mem, dict, "<", 0, builtin_less);
     dict = dict_append_builtin(&mem, dict, ">", 0, builtin_gr);
 

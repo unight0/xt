@@ -44,7 +44,7 @@ struct memory     mem;
 struct stack      st;
 struct stack      rst;
 struct entry     *dict;
-byte              mode;
+cell              mode;
 byte             *pad;
 
 /* Used for compilation mode */
@@ -420,7 +420,7 @@ main(int argc, char **argv) {
 
     mem = (struct memory) {
         mem_buf,
-        mem_buf + sizeof(struct memory),
+        mem_buf/* + sizeof(struct memory)*/,
         MEMORY_SIZE
     };
 

@@ -82,6 +82,7 @@ void builtin_not(struct token tok);
 
 void builtin_and(struct token tok);
 void builtin_or(struct token tok);
+void builtin_xor(struct token tok);
 void builtin_less(struct token tok);
 void builtin_gr(struct token tok);
 void builtin_source(struct token tok);
