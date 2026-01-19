@@ -5,6 +5,7 @@
 #include "stack.h"
 #include "lexer.h"
 
+void init_dict(void);
 // Pushes the next cell onto stack, skips it
 size_t stack_cells(struct stack *st);
 

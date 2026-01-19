@@ -2,10 +2,10 @@
 : b, here b! 1 allot ;
 : [ 0 mode b! ; immediate compile-only
 : ] 1 mode b! ; interpret-only
-: 'lit [ ' lit dup , , ] ;
+: 'lit [ ' lit throw dup , , ] ;
 : lit, 'lit , , ;
-: ['] ' lit, ; immediate compile-only
-: postpone ' lit, ['] , , ; immediate compile-only
+: ['] ' throw lit, ; immediate compile-only
+: postpone ' throw lit, ['] , , ; immediate compile-only
 
 : if postpone 0branch here 0 , ; immediate compile-only
 : else postpone branch here 1 cells + swap ! here 0 , ; immediate compile-only
@@ -150,7 +150,7 @@
 : variable create , ;
 \ Write value to variable X
 ( value to <spaces>X -- )
-: to ' dup 0= if drop -13 throw then execute ! ;
+: to ' throw execute ! ;
 
 \ EXPERIMENTAL
 \ A convenience word for allocating some memory on the

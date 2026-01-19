@@ -259,6 +259,43 @@ handle_token(struct token tok) {
     }
 }
 
+const char*
+throwstr(cell code) {
+    switch (code) {
+    case THROW_STACK_OVERFLOW:
+    return "Stack overflow";
+    case THROW_STACK_UNDERFLOW:
+    return "Stack underflow";
+    case THROW_UNDEFINED_WORD:
+    return "Undefined word";
+    case THROW_COMPONLY_WORD:
+    return "Compile-only word";
+    case THROW_IO_ERR:
+    return "I/O error";
+    case THROW_EOF:
+    return "EOF";
+    case THROW_MEM_POP_FAIL:
+    return "Memory pop fail";
+    case THROW_MEM_INSTALL_FAIL:
+    return "Memory installation fail";
+    case THROW_MALLOC_FAIL:
+    return "Heap allocation fail";
+    case THROW_REALLOC_FAIL:
+    return "Heap reallocation fail";
+    case THROW_FREE_FAIL:
+    return "Heap free fail";
+    case THROW_FILE_NONEXISTENT:
+    return "File doesn't exist";
+    case THROW_INVALID_ARGUMENT:
+    return "Invalid argument";
+    case THROW_INTRONLY_WORD:
+    return "Interpret-only word";
+    case THROW_OUT_OF_MEM:
+    return "Out of memory";
+    }
+    return NULL;
+}
+
 void
 throw(struct token tok,
       cell           val) {
@@ -275,6 +312,10 @@ throw(struct token tok,
     if (ip == NULL) {
         printf("(%d:%d '%s') CAUGHT %ld from %p\n",
                 tok.line+1, tok.col+1, tok.val, val, before);
+        const char *explain = throwstr(val);
+        if (explain != NULL) {
+            printf("%s\n", explain);
+        }
         fflush(stdout);
         // Error wasn't caught, terminate source execution
         terminate = 1;
@@ -355,103 +396,6 @@ refill(struct input *st) {
     st->cur = st->source;
 
     return 0;
-}
-
-void
-init_dict(void) {
-//Dictionary initialization {{{
-// This is huge and ugly, but c'est la vie. Using some sort of a loop would
-// require introducing additional data structures and redundant complexity,
-// which makes no sense, since this is only one function.
-    dict = dict_append_builtin(&mem, dict, "lit", 0, builtin_lit);
-    dict = dict_append_builtin(&mem, dict, "strlit", 0, builtin_strlit);
-    dict = dict_append_builtin(&mem, dict, "ret", 0, builtin_ret);
-
-    dict = dict_append_builtin(&mem, dict, ">r", 0, builtin_into_r);
-    dict = dict_append_builtin(&mem, dict, "r>", 0, builtin_from_r);
-    dict = dict_append_builtin(&mem, dict, "@r", 0, builtin_top_r);
-
-    dict = dict_append_builtin(&mem, dict, "execute", 0, builtin_execute);
-    dict = dict_append_builtin(&mem, dict, "branch", DICT_FLAG_COMPONLY, builtin_branch);
-    dict = dict_append_builtin(&mem, dict, "0branch", DICT_FLAG_COMPONLY, builtin_0branch);
-
-    dict = dict_append_builtin(&mem, dict, "cells", 0, builtin_cells);
-    dict = dict_append_builtin(&mem, dict, "allot", 0, builtin_allot);
-    dict = dict_append_builtin(&mem, dict, "here", 0, builtin_here);
-    dict = dict_append_builtin(&mem, dict, "mode", 0, builtin_mode);
-    dict = dict_append_builtin(&mem, dict, "mem-begin", 0, builtin_mem_begin);
-    dict = dict_append_builtin(&mem, dict, "mem-end", 0, builtin_mem_end);
-    dict = dict_append_builtin(&mem, dict, "@", 0, builtin_at);
-    dict = dict_append_builtin(&mem, dict, "!", 0, builtin_put);
-    dict = dict_append_builtin(&mem, dict, "b@", 0, builtin_bat);
-    dict = dict_append_builtin(&mem, dict, "b!", 0, builtin_bput);
-
-    dict = dict_append_builtin(&mem, dict, "heap-allocate", 0, builtin_allocate);
-    dict = dict_append_builtin(&mem, dict, "heap-resize", 0, builtin_resize);
-    dict = dict_append_builtin(&mem, dict, "heap-free", 0, builtin_free);
-    dict = dict_append_builtin(&mem, dict, "mem-install", 0, builtin_mem_install);
-    dict = dict_append_builtin(&mem, dict, "mem-pop", 0, builtin_mem_pop);
-
-    dict = dict_append_builtin(&mem, dict, "pad", 0, builtin_pad);
-    dict = dict_append_builtin(&mem, dict, "'", 0, builtin_dict_search);
-    dict = dict_append_builtin(&mem, dict, "dict", 0, builtin_dict);
-    dict = dict_append_builtin(&mem, dict, "->next", 0, builtin_dict_next);
-    dict = dict_append_builtin(&mem, dict, "->name", 0, builtin_dict_name);
-    dict = dict_append_builtin(&mem, dict, "->flag", 0, builtin_dict_flag);
-    dict = dict_append_builtin(&mem, dict, "->code", 0, builtin_dict_code);
-    dict = dict_append_builtin(&mem, dict, "->body", 0, builtin_dict_body);
-
-    dict = dict_append_builtin(&mem, dict, ":", 0, builtin_colon);
-    dict = dict_append_builtin(&mem, dict, ";", DICT_FLAG_IMMED, builtin_scolon);
-
-    dict = dict_append_builtin(&mem, dict, "immediate", 0, builtin_immediate);
-    dict = dict_append_builtin(&mem, dict, "compile-only", 0, builtin_componly);
-    dict = dict_append_builtin(&mem, dict, "interpret-only", 0, builtin_intronly);
-
-    dict = dict_append_builtin(&mem, dict, "drop", 0, builtin_drop);
-    dict = dict_append_builtin(&mem, dict, "swap", 0, builtin_swap);
-    dict = dict_append_builtin(&mem, dict, "over", 0, builtin_over);
-    dict = dict_append_builtin(&mem, dict, "rot", 0, builtin_rot);
-    dict = dict_append_builtin(&mem, dict, "dup", 0, builtin_dup);
-
-    dict = dict_append_builtin(&mem, dict, "+", 0, builtin_add);
-    dict = dict_append_builtin(&mem, dict, "*", 0, builtin_mul);
-    dict = dict_append_builtin(&mem, dict, "-", 0, builtin_sub);
-    dict = dict_append_builtin(&mem, dict, "/", 0, builtin_div);
-    dict = dict_append_builtin(&mem, dict, "=", 0, builtin_equ);
-    dict = dict_append_builtin(&mem, dict, "not", 0, builtin_not);
-    dict = dict_append_builtin(&mem, dict, "and", 0, builtin_and);
-    dict = dict_append_builtin(&mem, dict, "or", 0, builtin_or);
-    dict = dict_append_builtin(&mem, dict, "<", 0, builtin_less);
-    dict = dict_append_builtin(&mem, dict, ">", 0, builtin_gr);
-
-    dict = dict_append_builtin(&mem, dict, "refill", 0, builtin_refill);
-    dict = dict_append_builtin(&mem, dict, "source", 0, builtin_source);
-    dict = dict_append_builtin(&mem, dict, "*source", 0, builtin_src_cur);
-    dict = dict_append_builtin(&mem, dict, "source>", 0, builtin_src2b);
-    dict = dict_append_builtin(&mem, dict, ">term", 0, builtin_b2t);
-    //dict = dict_append_builtin(&mem, dict, "cr", 0, builtin_cr);
-    dict = dict_append_builtin(&mem, dict, ".", 0, builtin_dot);
-
-    dict = dict_append_builtin(&mem, dict, "file-open", 0, builtin_open_file);
-    dict = dict_append_builtin(&mem, dict, "file-create", 0, builtin_file_create);
-    dict = dict_append_builtin(&mem, dict, "file-close", 0, builtin_close_file);
-    dict = dict_append_builtin(&mem, dict, "file-read", 0, builtin_file_read);
-    dict = dict_append_builtin(&mem, dict, "file-write", 0, builtin_file_write);
-    dict = dict_append_builtin(&mem, dict, "file-size", 0, builtin_file_size);
-    dict = dict_append_builtin(&mem, dict, "file-as-source", 0, builtin_file_as_source);
-
-    dict = dict_append_builtin(&mem, dict, "catch", 0, builtin_catch);
-    dict = dict_append_builtin(&mem, dict, "throw", 0, builtin_throw);
-
-    dict = dict_append_builtin(&mem, dict, "create", 0, builtin_create);
-    dict = dict_append_builtin(&mem, dict, "does>", 0/*DICT_FLAG_COMPONLY*/, builtin_does);
-
-    dict = dict_append_builtin(&mem, dict, "stackdump", 0, builtin_stackdump);
-    dict = dict_append_builtin(&mem, dict, "worddump", 0, builtin_worddump);
-
-    dict = dict_append_builtin(&mem, dict, "quit", 0, builtin_quit);
-//}}}
 }
 
 int
