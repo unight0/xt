@@ -5,22 +5,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-
-//TODO?: change our execution mode from Indirect-Threaded
-//Code to Subroutine-Threaded Code. (JIT compilation)
-//That means:
-//* Word bodies do not consist of dictionary entry pointers
-//  anymore.
-//* Word bodies are actual machine code
-//* Shouldn't be too hard -- it is mostly CALL instructions
-//* The main memory buffer needs to be executable (through mmap)
-//
-//+ We do not need NEXT, we just call the code region directly
-//+ No need to allocate a return stack, we'll use the system one
-//+ Performance (!)
-//
-//- Harder to compile
-//- We become architecture-dependent (although easy to port)
+#include <signal.h>
+#include <setjmp.h>
 
 #include "defs.h"
 #include "input.h"
@@ -59,6 +45,13 @@ byte             *catch_st;
 byte             *catch_rst;
 byte              terminate;
 
+/* Last parsed token */
+struct token      lasttok;
+
+/* For restoring after segfaults */
+jmp_buf sigsegv_restore;
+
+
 void throw(struct token, cell);
 
 void
@@ -79,6 +72,8 @@ check_mem(struct token tok) {
 
 void
 NEXT(struct token tok) {
+   (void)sigsetjmp(sigsegv_restore, SIGSEGV);
+
     while (ip != NULL) {
         xt = (struct entry*)*ip;
 
@@ -98,8 +93,7 @@ NEXT(struct token tok) {
         // Sometimes ip is advanced when we THROW
         // I don't want to bother ensuring that it is
         // always NULL
-        // This assumes NULL == 0
-        if (ip < (cell*)(3 * sizeof(cell))) break;
+        if (ip < (cell*)(NULL + 3 * sizeof(cell))) break;
     }
 }
 
@@ -270,6 +264,8 @@ throwstr(cell code) {
     return "Undefined word";
     case THROW_COMPONLY_WORD:
     return "Compile-only word";
+    case THROW_INVALID_ADDRESS:
+    return "Invalid address";
     case THROW_IO_ERR:
     return "I/O error";
     case THROW_EOF:
@@ -329,45 +325,21 @@ throw(struct token tok,
 
 void
 eval() {
-    struct token tok = next(inpt);
+    lasttok = next(inpt);
 
-    while (tok.val != NULL) {
-        if (!strlen(tok.val)) {
-            tok = next(inpt);
+    while (lasttok.val != NULL) {
+        if (!strlen(lasttok.val)) {
+            lasttok = next(inpt);
             continue;
         }
         //printf("(%d:%d '%s')\n", tok.line + 1, tok.col + 1, tok.val);
-        handle_token(tok);
+        handle_token(lasttok);
 
         if (terminate) break;
 
-        tok = next(inpt);
+        lasttok = next(inpt);
     }
 }
-
-//byte *
-//readfile(const byte *filename) {
-//    FILE *f = fopen(filename, "r");
-//
-//    if (f == NULL) {
-//        perror("fopen()");
-//        return NULL;
-//    }
-//
-//    byte *code = NULL;
-//    size_t code_sz = 0;
-//
-//    while (!feof(f) && !ferror(f)) {
-//        code_sz++;
-//        code = realloc(code, code_sz);
-//        code[code_sz - 1] = fgetc(f);
-//    }
-//    code[code_sz - 1] = 0;
-//
-//    fclose(f);
-//
-//    return code;
-//}
 
 int
 refill(struct input *st) {
@@ -398,6 +370,15 @@ refill(struct input *st) {
     return 0;
 }
 
+void
+handle_sigsegv(int signal) {
+    (void) signal;
+
+    throw(lasttok, THROW_INVALID_ADDRESS);
+
+    siglongjmp(sigsegv_restore, 1);
+}
+
 int
 main(int argc, char **argv) {
     if (argc < 2) {
@@ -405,6 +386,8 @@ main(int argc, char **argv) {
         printf("a file that lays out definitions of some basic words\n");
         printf("You can use basis.f, which should come together with XT: %s basis.f\n", argv[0]);
     }
+
+    signal(SIGSEGV, handle_sigsegv);
 
     byte *mem_buf = malloc(MEMORY_SIZE);
 

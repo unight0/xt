@@ -172,6 +172,11 @@
     ' throw lit, postpone execute postpone !
 ; immediate
 
+\ About true and false:
+\ It is important that true = -1
+\ This is the same as 0XFF...FF
+\ The bitwise operations or, and, xor in our case also
+\ double as 'logical' or, and, and xor
 0 constant false
 -1 constant true
 
@@ -231,12 +236,11 @@ nil variable Sources
   done
   drop drop false
 ;
-
 \ Evaluate the contents of the specified file
 \ Example usage: $" test.f" include
 ( filename -- <???> )
 : include
-  dup included
+  dup included? not if dup included then
   r/o file-open throw file-as-source throw
 ;
 \ Same as include, but checks if the file was included before
