@@ -16,6 +16,7 @@
 : done swap postpone branch , here swap ! ; immediate compile-only
 
 : 1+ 1 + ;
+: 1- 1 - ;
 : != = not ;
 : 0= 0 = ;
 : 0!= 0 != ;
@@ -88,41 +89,48 @@
 \ Are strings equal?
 ( s1 s2 -- b )
 : streq?
- while
-   \ End of both strings
-   over b@ over b@
-   0!= swap 0!=
-   and
- begin
+  while
+    \ End of both strings
+    over b@ over b@
+    0!= swap 0!=
+    and
+  begin
     \ One string has ended before another?
     over over 0!= swap 0!= xor if drop drop 0 ret then
     \ Chars not equal?
     over b@ over b@ != if drop drop 0 ret then
     \ Advance
     1+ swap 1+
- done
- -1
+  done
+  -1
 ;
-\ Compile string push into a word
+\ State-smart word
+\ Compile: Compile string push into a word
+\ Interpret: allocate the string in the memory, push the string ptr
 ( s" <str>" -- str-ptr )
-: s"  ['] strlit ,
-  '"' parse here strcpy strlen 1 + allot
-; immediate compile-only
-\ A convenience function that mirrors s(
+: s"
+  \ Compile-time
+  mode @ if ['] strlit , then 
+
+  '"' parse here strcpy dup strlen 1 + allot
+
+  \ Compile-time
+  mode @ if drop then
+; immediate
+\ A convenience function that mirrors s"
 \ s( <str>) -- str-ptr
-: s(  ['] strlit ,
-  ')' parse here strcpy strlen 1 + allot
-; immediate compile-only
+: s(
+  \ Compile-time
+  -1 mode @ = if
+    ['] strlit ,
+  then 
+  ')' parse here strcpy dup strlen 1 + allot
+  -1 mode @ = if drop then
+; immediate
 : mem-report mem-used . '/' >term mem-total . s"  bytes used" type nl ; interpret-only
-\ Works similar to s", but for interpretation mode
-( $" <str>" -- str-ptr )
-: $" '"' parse here strcpy dup strlen 1 + allot ; interpret-only
-\ A convenience function that mirrors $"
-\ $( <str>) -- str-ptr
-: $( ')' parse here strcpy dup strlen 1 + allot ; interpret-only
 \ These two are convenience functions
 \ .( exists so that one can put " inside a string
-\ to be printed
+\ to be printed (until escaping is implemented)
 \ .( <str>) --
 : .( ')' parse type ; immediate
 \ (." <str>" -- )
@@ -186,10 +194,12 @@
 \ { Next (1 cell), Value (1 cell) }
 ( ll -- ll )
 : ll->next @ ;
+( ll -- *v )
+: ll->*value 1 cells + ;
 ( ll -- v )
-: ll->value 1 cells + @ ;
+: ll->value ll->*value @ ;
 ( v -- tail )
-: ll-new  here nil , swap , ;
+: ll-new here nil , swap , ;
 ( v head -- head )
 : ll-prepend here swap , swap , ;
 ( v after -- new-node )
@@ -208,7 +218,26 @@
 \ Append a new element after the tail node
 ( v ll -- new-node )
 : ll-append
-    ll-tail ll-insert
+  ll-tail ll-insert
+;
+\ Get Linked List length
+( head -- n )
+: ll-length
+  0
+  while over nil != begin
+    1+ swap ll->next swap
+  done
+  swap drop
+;
+\ Get the Nth element
+\ If n > length(head), returns nil
+( n head -- nth )
+: ll-nth
+  while
+  over over nil != swap 0!= and
+  begin
+    ll->next swap 1- swap
+  done swap drop
 ;
 \ Print the linked list
 ( ll -- )
@@ -223,7 +252,7 @@
 nil variable Sources
 ( file -- )
 : included
-    Sources @ ll-prepend Sources !
+  Sources @ ll-prepend Sources !
 ;
 ( file -- )
 : included?
@@ -237,7 +266,7 @@ nil variable Sources
   drop drop false
 ;
 \ Evaluate the contents of the specified file
-\ Example usage: $" test.f" include
+\ Example usage: s" test.f" include
 ( filename -- <???> )
 : include
   dup included? not if dup included then
@@ -260,3 +289,9 @@ nil variable Sources
     dup if ret then drop
     swap mem-install
 ;
+
+\ : s"  ['] strlit ,
+\   '"' parse here strcpy strlen 1 + allot
+\ ; immediate compile-only
+\ : s" '"' parse here strcpy dup strlen 1 + allot ; interpret-only
+\ 

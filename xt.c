@@ -265,7 +265,7 @@ throwstr(cell code) {
     case THROW_COMPONLY_WORD:
     return "Compile-only word";
     case THROW_INVALID_ADDRESS:
-    return "Invalid address";
+    return "Invalid memory access address";
     case THROW_IO_ERR:
     return "I/O error";
     case THROW_EOF:
