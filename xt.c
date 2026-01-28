@@ -31,7 +31,7 @@ struct stack      st;
 struct stack      rst;
 struct entry     *dict;
 cell              mode;
-byte             *pad;
+//byte             *pad;
 
 /* Used for compilation mode */
 char             *newword_name;
@@ -293,8 +293,7 @@ throwstr(cell code) {
 }
 
 void
-throw(struct token tok,
-      cell           val) {
+throw(struct token tok, cell val) {
 
     if (!val) return;
 
@@ -412,12 +411,11 @@ main(int argc, char **argv) {
 
     mode = MODE_INTERPRET;
 
-    pad = malloc(PAD_SIZE);
-
-    if (pad == NULL) {
-        perror("malloc()");
-        exit(1);
-    }
+    //pad = malloc(PAD_SIZE);
+    //if (pad == NULL) {
+    //    perror("malloc()");
+    //    exit(1);
+    //}
 
     dict = NULL;
 
@@ -485,5 +483,5 @@ main(int argc, char **argv) {
 
     free(inps);
     free(mem.mem);
-    free(pad);
+    //free(pad);
 }

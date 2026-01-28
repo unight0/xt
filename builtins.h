@@ -59,7 +59,7 @@ void builtin_free(struct token tok);
 void builtin_mem_install(struct token tok);
 // Pop the topmost installed memory block
 void builtin_mem_pop(struct token tok);
-void builtin_pad(struct token tok);
+//void builtin_pad(struct token tok);
 void builtin_dict_search(struct token tok);
 void builtin_dict(struct token tok);
 void builtin_dict_next(struct token tok);

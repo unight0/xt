@@ -16,7 +16,7 @@ extern struct stack      st;
 extern struct stack      rst;
 extern struct entry     *dict;
 extern cell              mode;
-extern byte             *pad;
+//extern byte             *pad;
 
 /* Used for compilation mode */
 extern char             *newword_name;
@@ -393,10 +393,10 @@ builtin_mem_pop(struct token tok) {
     push(tok, &st, 0);
 }
 
-void
-builtin_pad(struct token tok) {
-    push(tok, &st, (cell) pad);
-}
+//void
+//builtin_pad(struct token tok) {
+//    push(tok, &st, (cell) pad);
+//}
 
 void
 builtin_dict_search(struct token tok) {
@@ -991,7 +991,7 @@ builtin_quit(struct token tok) {
     (void)tok;
     free(inps);
     free(mem.mem);
-    free(pad);
+    //free(pad);
     exit(0);
 }
 
@@ -1030,7 +1030,7 @@ init_dict(void) {
     dict = dict_append_builtin(&mem, dict, "mem-install", 0, builtin_mem_install);
     //dict = dict_append_builtin(&mem, dict, "mem-pop", 0, builtin_mem_pop);
 
-    dict = dict_append_builtin(&mem, dict, "pad", 0, builtin_pad);
+    //dict = dict_append_builtin(&mem, dict, "pad", 0, builtin_pad);
     dict = dict_append_builtin(&mem, dict, "'", 0, builtin_dict_search);
     dict = dict_append_builtin(&mem, dict, "dict", 0, builtin_dict);
     dict = dict_append_builtin(&mem, dict, "->next", 0, builtin_dict_next);

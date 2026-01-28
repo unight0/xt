@@ -46,7 +46,7 @@
 \ compilation. But do...loop needs to be rewritten.
 ( limit index R:ret-ptr -- R:index limit ret-ptr )
 : (do) r> swap >r swap >r >r ; 
-( R:index limit ret-ptr -- not-done? )
+( R:index limit ret-ptr -- R:index+1 limit ret-ptr D:not-done? )
 : (loop) r> r> r> over swap 1 + rot over < swap >r swap >r swap >r ;
 : do postpone (do) here ; immediate compile-only
 : loop
@@ -173,12 +173,17 @@
 \ Write value to variable X
 \ This is a state-smart word
 ( value to <spaces>X -- )
-: to mode @ not if
+: to ' throw
+    mode @ not if
     \ Interpretation
-    ' throw execute ! ret then
+    execute ! ret then
     \ Compilation
-    ' throw lit, postpone execute postpone !
+    , postpone !
 ; immediate
+\ Create a buffer of a specified size
+\ No initialization occurs
+( size buffer <spaces>name -- )
+: buffer here swap allot constant ;
 
 \ About true and false:
 \ It is important that true = -1
@@ -187,8 +192,10 @@
 \ double as 'logical' or, and, and xor
 0 constant false
 -1 constant true
-
 0 constant nil
+
+1024 constant /Pad
+/Pad buffer Pad
 
 \ Linked List structure:
 \ { Next (1 cell), Value (1 cell) }
@@ -285,13 +292,7 @@ nil variable Sources
 \ heap and installing it as the current working memory
 ( sz -- ior )
 : mem-new
-    dup heap-allocate
-    dup if ret then drop
-    swap mem-install
+  dup heap-allocate
+  dup if ret then drop
+  swap mem-install
 ;
-
-\ : s"  ['] strlit ,
-\   '"' parse here strcpy strlen 1 + allot
-\ ; immediate compile-only
-\ : s" '"' parse here strcpy dup strlen 1 + allot ; interpret-only
-\ 
